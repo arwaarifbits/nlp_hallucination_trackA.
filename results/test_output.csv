@@ -1,0 +1,2 @@
+prompt,context,logits_shape
+What is the capital of France?,France is a country in Europe. Its capital is Paris.,"torch.Size([1, 20, 128256])"
