@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import pandas as pd
-from src.model_utils import load_model, get_logits, tokenizer
+from src.model_utils import load_model, get_logits
 import os
 import math
 
@@ -32,7 +32,7 @@ def compute_cig(logits_ctx, logits_noctx):
         cig_scores.append(cig)
     return cig_scores, pred_tokens.tolist()
 
-def save_token_level_csv(prompt, context, cig_scores, pred_tokens, labels=None, filename="results/token_level.csv"):
+def save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels=None, filename="results/token_level.csv"):
     """
     Save token-level data for analysis
     """
@@ -76,7 +76,7 @@ def run_cig_on_dataset(df, context_col="context", prompt_col="prompt", label_col
         # Step 3: Save CSV per sample
         sample_filename = f"results/token_level_sample_{i}.csv"
         labels_list = [label]*len(pred_tokens) if label is not None else None
-        save_token_level_csv(prompt, context, cig_scores, pred_tokens, labels_list, filename=sample_filename)
+        save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels_list, filename=sample_filename)
         
         all_results.append({
             "prompt": prompt,
