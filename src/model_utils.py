@@ -26,14 +26,24 @@ def load_model():
     return tokenizer, model
 
 
-def get_logits(prompt, tokenizer, model, context=None):
+def get_logits(prompt, tokenizer, model, context=None, max_length=100):
     """
-    Returns logits for each token.
+    Returns logits for each token of the prompt.
+    If context is provided, prepend it to the prompt.
     """
-    input_text = (context + "\n" + prompt) if context else prompt
-    inputs = tokenizer(input_text, return_tensors="pt").to(device)
+    if context:
+        input_text = context + "\n" + prompt
+    else:
+        input_text = prompt
 
+    inputs = tokenizer(input_text, return_tensors="pt").to(device)
     with torch.no_grad():
         outputs = model(**inputs)
 
-    return outputs.logits
+    # Get prompt token indices
+    prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"].to(device)
+    start_idx = outputs.logits.shape[1] - prompt_ids.shape[1]
+
+    # Slice logits for prompt tokens only
+    prompt_logits = outputs.logits[:, start_idx:, :]
+    return prompt_logits

@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import pandas as pd
+from typer import prompt
 from src.model_utils import load_model, get_logits
 import os
 import math
@@ -14,6 +15,8 @@ def compute_cig(logits_ctx, logits_noctx):
     
     Returns: list of CIG values per token
     """
+
+    
     # Convert logits → probabilities
     probs_ctx = F.softmax(logits_ctx, dim=-1)
     probs_noctx = F.softmax(logits_noctx, dim=-1)
@@ -67,11 +70,11 @@ def run_cig_on_dataset(df, context_col="context", prompt_col="prompt", label_col
         label = row[label_col] if label_col in row else None
         
         # Step 1: Generate logits with and without context
-        logits_ctx = get_logits(prompt, tokenizer, model, context)
-        logits_noctx = get_logits(prompt, tokenizer, model)
-        
+        logits_ctx = get_logits(prompt, context)
+        logits_noctx = get_logits(prompt)
+
         # Step 2: Compute CIG
-        cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])  # logits shape: [1, seq_len, vocab_size]
+        cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
         
         # Step 3: Save CSV per sample
         sample_filename = f"results/token_level_sample_{i}.csv"

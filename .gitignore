@@ -1,8 +1,8 @@
 # .gitignore
 __pycache__/
 *.pyc
-*.csv
 *.pt
+*.csv
 *.log
 venv/
 .ipynb_checkpoints/
