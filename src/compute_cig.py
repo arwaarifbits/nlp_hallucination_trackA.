@@ -28,6 +28,8 @@ def compute_cig(logits_ctx, logits_noctx):
         cig = torch.log(torch.tensor(p_ctx)) - torch.log(torch.tensor(p_noctx))
         cig_scores.append(cig.item())
 
+    
+
     return cig_scores, pred_tokens[:seq_len]
 
 def save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels=None, filename="results/token_level.csv"):
@@ -67,6 +69,10 @@ def run_cig_on_dataset(df, context_col="context", prompt_col="prompt", label_col
         # Step 1: Generate logits with and without context
         logits_ctx = get_logits(prompt, context)
         logits_noctx = get_logits(prompt)
+
+        print("logits_ctx shape:", logits_ctx.shape)
+        print("logits_noctx shape:", logits_noctx.shape)
+        print("seq_len used for CIG:", seq_len)
 
         # Step 2: Compute CIG
         cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
