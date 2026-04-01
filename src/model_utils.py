@@ -8,7 +8,7 @@ from huggingface_hub import login
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B"
-
+print(f"Loading model {MODEL_NAME} on {device}...")
 
 def load_model():
     """
@@ -20,7 +20,7 @@ def load_model():
 
     print(f"Loading model {MODEL_NAME} on {device}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, device_map="auto", torch_dtype=torch.float16).to(device)
     print("Model loaded successfully!")
 
     return tokenizer, model
