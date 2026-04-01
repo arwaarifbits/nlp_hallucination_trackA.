@@ -36,14 +36,14 @@ def get_logits(prompt, tokenizer, model, context=None, max_length=100):
     else:
         input_text = prompt
 
-    inputs = tokenizer(input_text, return_tensors="pt").to(device)
+    inputs_full = tokenizer(input_text, return_tensors="pt").to(device)
     with torch.no_grad():
-        outputs = model(**inputs)
+        outputs_full = model(**inputs_full)
 
-    # Get prompt token indices
-    prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"].to(device)
-    start_idx = outputs.logits.shape[1] - prompt_ids.shape[1]
+     # Tokenize prompt alone to slice logits
+    inputs_prompt = tokenizer(prompt, return_tensors="pt").to(device)
+    prompt_len = inputs_prompt["input_ids"].shape[1]
 
-    # Slice logits for prompt tokens only
-    prompt_logits = outputs.logits[:, start_idx:, :]
+    # Slice last `prompt_len` tokens
+    prompt_logits = outputs_full.logits[:, -prompt_len:, :]
     return prompt_logits

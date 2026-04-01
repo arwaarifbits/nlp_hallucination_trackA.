@@ -8,32 +8,27 @@ import math
 
 def compute_cig(logits_ctx, logits_noctx):
     """
-    Computes token-level CIG: log(P(y|x,C)) - log(P(y|x))
-    
+    Compute token-level Contextual Information Gain (CIG)
     logits_ctx: [seq_len, vocab_size]
     logits_noctx: [seq_len, vocab_size]
-    
-    Returns: list of CIG values per token
     """
-
-    
-    # Convert logits → probabilities
     probs_ctx = F.softmax(logits_ctx, dim=-1)
     probs_noctx = F.softmax(logits_noctx, dim=-1)
-    
-    # Take the probability of each predicted token
-    pred_tokens = torch.argmax(probs_ctx, dim=-1)  # predicted tokens by model
-    
+
+    pred_tokens = torch.argmax(probs_ctx, dim=-1)  # predicted tokens
+
+    # Ensure we don't go out of bounds if any length mismatch
+    seq_len = min(probs_ctx.shape[0], probs_noctx.shape[0])
     cig_scores = []
-    for t, token_id in enumerate(pred_tokens):
-        p_ctx = probs_ctx[t, token_id].item()
-        p_noctx = probs_noctx[t, token_id].item()
-        # Avoid log(0)
-        p_ctx = max(p_ctx, 1e-12)
-        p_noctx = max(p_noctx, 1e-12)
-        cig = math.log(p_ctx) - math.log(p_noctx)
-        cig_scores.append(cig)
-    return cig_scores, pred_tokens.tolist()
+
+    for t in range(seq_len):
+        token_id = pred_tokens[t].item()
+        p_ctx = max(probs_ctx[t, token_id].item(), 1e-12)
+        p_noctx = max(probs_noctx[t, token_id].item(), 1e-12)
+        cig = torch.log(torch.tensor(p_ctx)) - torch.log(torch.tensor(p_noctx))
+        cig_scores.append(cig.item())
+
+    return cig_scores, pred_tokens[:seq_len]
 
 def save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels=None, filename="results/token_level.csv"):
     """
