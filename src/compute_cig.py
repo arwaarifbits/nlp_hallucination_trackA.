@@ -71,14 +71,22 @@ def run_cig_on_dataset(df, context_col="context", prompt_col="prompt", label_col
         context = row[context_col] if context_col in row else None
         label = row[label_col] if label_col in row else None
         
-        # Step 1: Generate logits with and without context
-        logits_ctx = get_logits(prompt, tokenizer, model, context)
-        logits_noctx = get_logits(prompt, tokenizer, model)
+        # Step 1: Generate answer using context
+        answer_text = generate_answer(prompt, context, tokenizer, model)
 
-        # Step 2: Compute CIG
+        # Safety check
+        if len(answer_text.strip()) == 0:
+            print(f"[WARNING] Empty generation at sample {i}")
+            continue
+
+        # Step 2: Compute logits on GENERATED answer
+        logits_ctx = get_logits(answer_text, tokenizer, model, context)
+        logits_noctx = get_logits(answer_text, tokenizer, model)
+
+        # Step 3: Compute CIG
         cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
         
-        # Step 3: Save CSV per sample
+        # Step 4: Save CSV per sample
         sample_filename = f"results/token_level_sample_{i}.csv"
         labels_list = [label]*len(pred_tokens) if label is not None else None
         save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels_list, filename=sample_filename)
@@ -131,6 +139,7 @@ def run_cig_in_batches(df, batch_size=10, prompt_col="prompt", context_col="cont
             logits_ctx = get_logits(answer_text, tokenizer, model,  context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
             
+            # compute CIG
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
             sample_filename = f"results/token_level_sample_{i}.csv"
