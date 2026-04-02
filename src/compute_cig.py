@@ -1,3 +1,4 @@
+from multiprocessing import context
 from xml.parsers.expat import model
 
 import torch
@@ -30,7 +31,9 @@ def compute_cig(logits_ctx, logits_noctx):
         cig = torch.log(torch.tensor(p_ctx)) - torch.log(torch.tensor(p_noctx))
         cig_scores.append(cig.item())
 
-    
+        # 🔥 DEBUG HERE
+        if t < 5:
+            print(f"[DEBUG] Token {t}: p_ctx={p_ctx:.6f}, p_noctx={p_noctx:.6f}, CIG={cig.item():.4f}")
 
     return cig_scores, pred_tokens[:seq_len]
 
@@ -111,9 +114,23 @@ def run_cig_in_batches(df, batch_size=10, prompt_col="prompt", context_col="cont
             context = row[context_col] if context_col in row else None
             label = row[label_col] if label_col in row else None
 
-            logits_ctx = get_logits(prompt, tokenizer, model, context)
-            logits_noctx = get_logits(prompt, tokenizer, model)
+            # Step 1: Generate answer using context
+            answer_text = generate_answer(prompt, context, tokenizer, model)
 
+            if i < 2:  # only first 2 samples to avoid spam
+                print("\n===== DEBUG SAMPLE =====")
+                print("PROMPT:\n", prompt[:200])
+                print("\nCONTEXT:\n", str(context)[:200])
+                print("\nGENERATED ANSWER:\n", answer_text[:300])
+                print("========================\n")
+           
+            if len(answer_text.strip()) == 0:
+                continue  # skip empty outputs
+
+            # Step 2: Get logits on GENERATED ANSWER
+            logits_ctx = get_logits(answer_text, tokenizer, model,  context)
+            logits_noctx = get_logits(answer_text, tokenizer, model)
+            
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
             sample_filename = f"results/token_level_sample_{i}.csv"
@@ -129,3 +146,26 @@ def run_cig_in_batches(df, batch_size=10, prompt_col="prompt", context_col="cont
     summary_df = pd.DataFrame(all_results)
     summary_df.to_csv("results/summary.csv", index=False)
     print("Summary CSV saved to results/summary.csv")
+
+
+def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100):
+    if context:
+        input_text = context + "\n" + prompt
+    else:
+        input_text = prompt
+
+    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False
+        )
+
+    generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+    # Extract only generated part
+    answer_text = generated_text[len(input_text):]
+
+    return answer_text.strip()
