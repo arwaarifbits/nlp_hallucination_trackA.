@@ -58,23 +58,28 @@ def save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels=None, filena
     print(f"Token-level data saved to {filename}")
 
 
-def run_cig_on_dataset(df, context_col="context", prompt_col="prompt", label_col="label_hallucination"):
+def run_cig_on_dataset(df, dataset_name=None, context_col="context", prompt_col="prompt", label_col="label_hallucination"):
     """
-    Run CIG computation for entire dataset
+    Run CIG computation for entire dataset.
+    For HaluEval, original_prompt is used as context.
     """
     tokenizer, model = load_model()
     
     all_results = []
-    
+
     for i, row in df.iterrows():
         prompt = row[prompt_col]
-        context = row[context_col] if context_col in row else None
-        label = row[label_col] if label_col in row else None
+        # Use original_prompt for HaluEval
+        if dataset_name == "halueval":
+            context = row.get("original_prompt", None)
+        else:
+            context = row.get(context_col, None)
+        
+        label = row.get(label_col, None)
         
         # Step 1: Generate answer using context
         answer_text = generate_answer(prompt, context, tokenizer, model)
 
-        # Safety check
         if len(answer_text.strip()) == 0:
             print(f"[WARNING] Empty generation at sample {i}")
             continue
@@ -103,11 +108,7 @@ def run_cig_on_dataset(df, context_col="context", prompt_col="prompt", label_col
     print("Summary CSV saved to results/summary.csv")
 
 
-# src/compute_cig.py (add new function)
-def run_cig_in_batches(df, batch_size=10, prompt_col="prompt", context_col="context", label_col="label_binary"):
-    from src.model_utils import load_model, get_logits
-    import math
-    
+def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt", context_col="context", label_col="label_binary"):
     tokenizer, model = load_model()
     
     all_results = []
@@ -119,27 +120,20 @@ def run_cig_in_batches(df, batch_size=10, prompt_col="prompt", context_col="cont
         
         for i, row in batch_df.iterrows():
             prompt = row[prompt_col]
-            context = row[context_col] if context_col in row else None
-            label = row[label_col] if label_col in row else None
+            if dataset_name == "halueval":
+                context = row.get("original_prompt", None)
+            else:
+                context = row.get(context_col, None)
+            label = row.get(label_col, None)
 
-            # Step 1: Generate answer using context
             answer_text = generate_answer(prompt, context, tokenizer, model)
 
-            if i < 2:  # only first 2 samples to avoid spam
-                print("\n===== DEBUG SAMPLE =====")
-                print("PROMPT:\n", prompt[:200])
-                print("\nCONTEXT:\n", str(context)[:200])
-                print("\nGENERATED ANSWER:\n", answer_text[:300])
-                print("========================\n")
-           
             if len(answer_text.strip()) == 0:
-                continue  # skip empty outputs
+                continue
 
-            # Step 2: Get logits on GENERATED ANSWER
-            logits_ctx = get_logits(answer_text, tokenizer, model,  context)
+            logits_ctx = get_logits(answer_text, tokenizer, model, context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
             
-            # compute CIG
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
             sample_filename = f"results/token_level_sample_{i}.csv"
@@ -157,11 +151,30 @@ def run_cig_in_batches(df, batch_size=10, prompt_col="prompt", context_col="cont
     print("Summary CSV saved to results/summary.csv")
 
 
-def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100):
-    if context:
-        input_text = context + "\n" + prompt
+def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
+    """
+    Generate answer using model.
+    For HaluEval, automatically splits 'Knowledge:' from the question
+    to avoid repeating the passage in the output.
+    """
+    if dataset_name == "halueval" and context:
+        # Split context into knowledge and question
+        if context.startswith("Knowledge:"):
+            # Find the position of the last "Question:" in context
+            split_pos = context.rfind("Question:")
+            if split_pos != -1:
+                knowledge = context[len("Knowledge:"):split_pos].strip()
+                question_in_context = context[split_pos:].strip()
+                # Use knowledge as context, prompt as question
+                input_text = knowledge + "\n" + prompt
+            else:
+                # fallback: use full context
+                input_text = context + "\n" + prompt
+        else:
+            input_text = context + "\n" + prompt
     else:
-        input_text = prompt
+        # Normal case: just prepend context if available
+        input_text = (context + "\n" if context else "") + prompt
 
     inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
 
@@ -174,7 +187,7 @@ def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100):
 
     generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-    # Extract only generated part
+    # Extract only the generated part (after input_text)
     answer_text = generated_text[len(input_text):]
 
     return answer_text.strip()
