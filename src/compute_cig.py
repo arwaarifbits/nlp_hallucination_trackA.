@@ -90,3 +90,42 @@ def run_cig_on_dataset(df, context_col="context", prompt_col="prompt", label_col
     summary_df = pd.DataFrame(all_results)
     summary_df.to_csv("results/summary.csv", index=False)
     print("Summary CSV saved to results/summary.csv")
+
+
+# src/compute_cig.py (add new function)
+def run_cig_in_batches(df, batch_size=10, prompt_col="prompt", context_col="context", label_col="label_binary"):
+    from src.model_utils import load_model, get_logits
+    import math
+    
+    tokenizer, model = load_model()
+    
+    all_results = []
+    n_batches = math.ceil(len(df) / batch_size)
+    
+    for b in range(n_batches):
+        batch_df = df.iloc[b*batch_size : (b+1)*batch_size]
+        print(f"Processing batch {b+1}/{n_batches} ({len(batch_df)} samples)")
+        
+        for i, row in batch_df.iterrows():
+            prompt = row[prompt_col]
+            context = row[context_col] if context_col in row else None
+            label = row[label_col] if label_col in row else None
+
+            logits_ctx = get_logits(prompt, tokenizer, model, context)
+            logits_noctx = get_logits(prompt, tokenizer, model)
+
+            cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
+
+            sample_filename = f"results/token_level_sample_{i}.csv"
+            labels_list = [label]*len(pred_tokens) if label is not None else None
+            save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels_list, filename=sample_filename)
+
+            all_results.append({
+                "prompt": prompt,
+                "context": context,
+                "sample_csv": sample_filename
+            })
+    
+    summary_df = pd.DataFrame(all_results)
+    summary_df.to_csv("results/summary.csv", index=False)
+    print("Summary CSV saved to results/summary.csv")
