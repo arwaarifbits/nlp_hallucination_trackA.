@@ -1,3 +1,5 @@
+from xml.parsers.expat import model
+
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -67,8 +69,8 @@ def run_cig_on_dataset(df, context_col="context", prompt_col="prompt", label_col
         label = row[label_col] if label_col in row else None
         
         # Step 1: Generate logits with and without context
-        logits_ctx = get_logits(prompt, context)
-        logits_noctx = get_logits(prompt)
+        logits_ctx = get_logits(prompt, tokenizer, model, context)
+        logits_noctx = get_logits(prompt, tokenizer, model)
 
         # Step 2: Compute CIG
         cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
