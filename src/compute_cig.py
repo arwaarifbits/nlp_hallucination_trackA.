@@ -1,25 +1,22 @@
 import torch
 import torch.nn.functional as F
 import pandas as pd
-from typer import prompt
 from src.model_utils import load_model, get_logits
 import os
 import math
 import ast
 
-
 def compute_cig(logits_ctx, logits_noctx):
     """
     Compute token-level Contextual Information Gain (CIG)
-    logits_ctx: [seq_len, vocab_size]
-    logits_noctx: [seq_len, vocab_size]
+    Equation: CIG = log P(y|ctx) - log P(y|no_ctx)
     """
     probs_ctx = F.softmax(logits_ctx, dim=-1)
     probs_noctx = F.softmax(logits_noctx, dim=-1)
 
-    pred_tokens = torch.argmax(probs_ctx, dim=-1)  # predicted tokens
+    # We take the argmax of the context probabilities as the predicted tokens
+    pred_tokens = torch.argmax(probs_ctx, dim=-1) 
 
-    # Ensure we don't go out of bounds if any length mismatch
     seq_len = min(probs_ctx.shape[0], probs_noctx.shape[0])
     cig_scores = []
 
@@ -27,28 +24,22 @@ def compute_cig(logits_ctx, logits_noctx):
         token_id = pred_tokens[t].item()
         p_ctx = max(probs_ctx[t, token_id].item(), 1e-12)
         p_noctx = max(probs_noctx[t, token_id].item(), 1e-12)
+        
+        # Mathematical definition for Track A
         cig = torch.log(torch.tensor(p_ctx)) - torch.log(torch.tensor(p_noctx))
         cig_scores.append(cig.item())
-
-        # 🔥 DEBUG HERE
-        if t < 5:
-            print(f"[DEBUG] Token {t}: p_ctx={p_ctx:.6f}, p_noctx={p_noctx:.6f}, CIG={cig.item():.4f}")
 
     return cig_scores, pred_tokens[:seq_len]
 
 def save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels=None, filename="results/token_level.csv"):
     tokens = tokenizer.convert_ids_to_tokens(pred_tokens)
-    
     min_len = min(len(tokens), len(cig_scores))
-    if labels is not None:
-        min_len = min(min_len, len(labels))
     
     data = {
         "token": tokens[:min_len],
         "cig_score": cig_scores[:min_len]
     }
     
-    # Using 'is not None' ensures that 0 is saved correctly
     if labels is not None:
         data["hallucination_label"] = labels[:min_len]
     
@@ -57,65 +48,7 @@ def save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels=None, filena
     df.to_csv(filename, index=False)
     print(f"[SUCCESS] Saved {len(df)} tokens to {filename}")
 
-
-def run_cig_on_dataset(df, dataset_name=None, context_col="context", prompt_col="prompt", label_col="label_hallucination"):
-    """
-    Run CIG computation for entire dataset.
-    For HaluEval, original_prompt is used as context.
-    """
-    tokenizer, model = load_model()
-    
-    all_results = []
-
-    for i, row in df.iterrows():
-        prompt = row[prompt_col]
-        # Use original_prompt for HaluEval
-        if dataset_name == "halueval":
-            context = row.get("original_prompt", None)
-        else:
-            context = row.get(context_col, None)
-        
-        #label extraction
-        raw_label = row.get(label_col, None)
-        if isinstance(raw_label, str):
-            try:
-                label = ast.literal_eval(raw_label)
-            except:
-                label = None
-        else:
-            label = raw_label
-        
-        # Step 1: Generate answer using context
-        answer_text = generate_answer(prompt, context, tokenizer, model)
-
-        if len(answer_text.strip()) == 0:
-            print(f"[WARNING] Empty generation at sample {i}")
-            continue
-
-        # Step 2: Compute logits on GENERATED answer
-        logits_ctx = get_logits(answer_text, tokenizer, model, context)
-        logits_noctx = get_logits(answer_text, tokenizer, model)
-
-        # Step 3: Compute CIG
-        cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
-        
-        # Step 4: Save CSV per sample
-        sample_filename = f"results/token_level_sample_{i}.csv"
-        labels_list = [label]*len(pred_tokens) if label is not None else None
-        save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels_list, filename=sample_filename)
-        
-        all_results.append({
-            "prompt": prompt,
-            "context": context,
-            "sample_csv": sample_filename
-        })
-    
-    # Optionally save summary CSV
-    summary_df = pd.DataFrame(all_results)
-    summary_df.to_csv(f"results/{dataset_name}_summary.csv", index=False)
-    print(f"Summary CSV saved to results/{dataset_name}_summary.csv")
-
-def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt", context_col="context", label_col="label_binary"):
+def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt", context_col="context", label_col="hallucination_labels"):
     tokenizer, model = load_model()
     all_results = []
     n_batches = math.ceil(len(df) / batch_size)
@@ -125,36 +58,42 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
         print(f"Processing batch {b+1}/{n_batches}")
         
         for i, row in batch_df.iterrows():
-            prompt = row[prompt_col]
-            
-            # THE SMART CONTEXT PICKER
-            if dataset_name == "halueval":
-                context = row.get("original_prompt", None)
+            # --- PRIMARY CHANGE: Use dataset's model_answer ---
+            if "model_answer" in row and pd.notna(row["model_answer"]):
+                answer_text = str(row["model_answer"])
             else:
-                context = row.get(context_col, None)
-                if context is None and "context" in row:
-                    context = row["context"]
+                print(f"[WARNING] No model_answer for sample {i}. Falling back to generation.")
+                temp_context = row.get("original_prompt", row.get(context_col, ""))
+                answer_text = generate_answer(row[prompt_col], temp_context, tokenizer, model, dataset_name=dataset_name)
 
-            # GENERATION
-            answer_text = generate_answer(prompt, context, tokenizer, model, dataset_name=dataset_name)
-            if not answer_text or len(answer_text.strip()) == 0:
-                answer_text = prompt if prompt else "N/A"
+            # Determine Context
+            if dataset_name == "halueval":
+                context = row.get("original_prompt", "")
+            else:
+                context = row.get(context_col, row.get("context", ""))
 
-            # LOGITS & CIG
+            # Compute Logits based on the FIXED answer_text
             logits_ctx = get_logits(answer_text, tokenizer, model, context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
+            
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
-            # LABELS
+            # Label Parsing
             raw_label = row.get(label_col, None)
-            # Add logic here to ensure label is never None if it exists in the row
-            label = raw_label if raw_label is not None else None
+            label = None
+            if isinstance(raw_label, str):
+                try:
+                    label = ast.literal_eval(raw_label)
+                except:
+                    # Handle binary strings if necessary
+                    label = 1 if raw_label.lower() in ['hallucinated', '1'] else 0
+            else:
+                label = raw_label
 
-            # FOLDER & FILE PATH
+            # Save per-sample results
             os.makedirs(f"results/{dataset_name}", exist_ok=True)
             sample_filename = f"results/{dataset_name}/token_level_sample_{i}.csv"
             
-            # PROCESS LABELS (Span vs Binary)
             labels_list = None
             if label is not None:
                 if isinstance(label, list): 
@@ -164,83 +103,42 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
                 else:
                     labels_list = [label] * len(pred_tokens)
 
-            # SAVE
             save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels_list, filename=sample_filename)
 
             all_results.append({
-                "prompt": prompt[:100],
+                "index": i,
+                "prompt": row[prompt_col][:100],
                 "sample_csv": sample_filename
             })
     
-    # FINAL SUMMARY
     summary_df = pd.DataFrame(all_results)
     summary_path = f"results/{dataset_name}_summary.csv"
     summary_df.to_csv(summary_path, index=False)
-    print(f"Workflow Complete. Summary saved to {summary_path}")
-
-
-
-def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
-    """
-    Generate answer using model.
-    For HaluEval, automatically splits 'Knowledge:' from the question.
-    """
-    if dataset_name == "halueval" and context:
-        # Split context into knowledge and question
-        if context.startswith("Knowledge:"):
-            split_pos = context.rfind("Question:")
-            if split_pos != -1:
-                knowledge = context[len("Knowledge:"):split_pos].strip()
-                input_text = knowledge + "\n" + prompt
-            else:
-                input_text = context + "\n" + prompt
-        else:
-            input_text = context + "\n" + prompt
-    else:
-        input_text = (context + "\n" if context else "") + prompt
-
-    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
-
-    with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            repetition_penalty=1.2,
-            no_repeat_ngram_size=3
-        )
-
-    generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
-    # Extract only the generated part
-    if generated_text.startswith(input_text):
-        answer_text = generated_text[len(input_text):]
-    else:
-        answer_text = generated_text
-
-    return answer_text.strip()
-
+    print(f"Workflow Complete. Summary: {summary_path}")
 
 def convert_spans_to_token_labels(offsets, spans):
-    """
-    Convert character-level spans to token-level labels
-    offsets: list of (start, end) for each token
-    spans: list of dicts with 'start', 'end'
-    """
     token_labels = []
-
     for (token_start, token_end) in offsets:
+        # Ignore special tokens with (0,0) offsets if they exist
+        if token_start == 0 and token_end == 0:
+            token_labels.append(0)
+            continue
+            
         label = 0
-
         for span in spans:
-            span_start = span['start']
-            span_end = span['end']
-
-            # Check overlap
-            if not (token_end <= span_start or token_start >= span_end):
+            s_start, s_end = span['start'], span['end']
+            # Overlap check
+            if not (token_end <= s_start or token_start >= s_end):
                 label = 1
                 break
-
         token_labels.append(label)
-
     return token_labels
+
+def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
+    # (Kept as fallback logic)
+    input_text = (str(context) + "\n" if context else "") + str(prompt)
+    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+    generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    return generated_text[len(input_text):].strip() if generated_text.startswith(input_text) else generated_text
