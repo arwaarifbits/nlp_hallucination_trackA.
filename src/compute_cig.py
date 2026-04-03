@@ -115,8 +115,8 @@ def run_cig_on_dataset(df, dataset_name=None, context_col="context", prompt_col=
     
     # Optionally save summary CSV
     summary_df = pd.DataFrame(all_results)
-    summary_df.to_csv("results/summary.csv", index=False)
-    print("Summary CSV saved to results/summary.csv")
+    summary_df.to_csv(f"results/{dataset_name}_summary.csv", index=False)
+    print(f"Summary CSV saved to results/{dataset_name}_summary.csv")
 
 
 def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt", context_col="context", label_col="label_binary"):
@@ -201,7 +201,7 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
     
     summary_df = pd.DataFrame(all_results)
     summary_df.to_csv(f"results/{dataset_name}_summary.csv", index=False)
-    print("Summary CSV saved to results/summary.csv")
+    print(f"Summary CSV saved to results/{dataset_name}_summary.csv")
 
 
 def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
@@ -243,8 +243,16 @@ def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, datas
     generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
     # Extract only the generated part (after input_text)
-    answer_text = generated_text[len(input_text):]
+    # Safe slicing
+    if generated_text.startswith(input_text):
+        answer_text = generated_text[len(input_text):]
+    else:
+        answer_text = generated_text
 
+    if len(answer_text.strip()) == 0:
+        print(f"[WARNING] Empty generation at sample {i} — using prompt as fallback")
+        answer_text = prompt if prompt else "N/A"
+    
     return answer_text.strip()
 
 
