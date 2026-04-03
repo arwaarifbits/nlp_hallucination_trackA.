@@ -1,3 +1,4 @@
+from cProfile import label
 from multiprocessing import context
 from xml.parsers.expat import model
 
@@ -8,6 +9,8 @@ from typer import prompt
 from src.model_utils import load_model, get_logits
 import os
 import math
+import ast
+
 
 def compute_cig(logits_ctx, logits_noctx):
     """
@@ -75,7 +78,15 @@ def run_cig_on_dataset(df, dataset_name=None, context_col="context", prompt_col=
         else:
             context = row.get(context_col, None)
         
-        label = row.get(label_col, None)
+        #label extraction
+        raw_label = row.get(label_col, None)
+        if isinstance(raw_label, str):
+            try:
+                label = ast.literal_eval(raw_label)
+            except:
+                label = None
+        else:
+            label = raw_label
         
         # Step 1: Generate answer using context
         answer_text = generate_answer(prompt, context, tokenizer, model)
@@ -124,12 +135,30 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
                 context = row.get("original_prompt", None)
             else:
                 context = row.get(context_col, None)
-            label = row.get(label_col, None)
+            
+            raw_label = row.get(label_col, None)
 
-            answer_text = generate_answer(prompt, context, tokenizer, model)
+            if isinstance(raw_label, str):
+                try:
+                    label = ast.literal_eval(raw_label)
+                except:
+                    label = None
+            else:
+                label = raw_label
+
+            answer_text = generate_answer(prompt, context, tokenizer, model, dataset_name=dataset_name)
 
             if len(answer_text.strip()) == 0:
                 continue
+            
+            encoding = tokenizer(
+                answer_text,
+                return_offsets_mapping=True,
+                return_tensors="pt"
+            )
+
+            offsets = encoding["offset_mapping"][0].tolist()
+
 
             logits_ctx = get_logits(answer_text, tokenizer, model, context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
@@ -137,7 +166,30 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
             sample_filename = f"results/token_level_sample_{i}.csv"
-            labels_list = [label]*len(pred_tokens) if label is not None else None
+            
+            labels_list = None
+
+            if label is not None:
+                if isinstance(label, list):  # span labels
+                    token_labels = convert_spans_to_token_labels(offsets, label)
+
+                    # Ensure same length as pred_tokens
+                    min_len = min(len(pred_tokens), len(cig_scores), len(token_labels))
+
+                    pred_tokens = pred_tokens[:min_len]
+                    cig_scores = cig_scores[:min_len]
+                    token_labels = token_labels[:min_len]
+
+                    labels_list = token_labels
+                else:
+                    labels_list = [label] * len(pred_tokens)
+
+            if i < 2 and labels_list is not None:
+                print("\n=== TOKEN LABEL DEBUG ===")
+                for j in range(min(10, len(labels_list))):
+                    print(f"Token {j}: Label={labels_list[j]}")
+                print("========================\n")
+            
             save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels_list, filename=sample_filename)
 
             all_results.append({
@@ -182,7 +234,9 @@ def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, datas
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=False
+            do_sample=False,
+            repetition_penalty=1.2,      
+            no_repeat_ngram_size=3       
         )
 
     generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
@@ -191,3 +245,28 @@ def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, datas
     answer_text = generated_text[len(input_text):]
 
     return answer_text.strip()
+
+
+def convert_spans_to_token_labels(offsets, spans):
+    """
+    Convert character-level spans to token-level labels
+    offsets: list of (start, end) for each token
+    spans: list of dicts with 'start', 'end'
+    """
+    token_labels = []
+
+    for (token_start, token_end) in offsets:
+        label = 0
+
+        for span in spans:
+            span_start = span['start']
+            span_end = span['end']
+
+            # Check overlap
+            if not (token_end <= span_start or token_start >= span_end):
+                label = 1
+                break
+
+        token_labels.append(label)
+
+    return token_labels

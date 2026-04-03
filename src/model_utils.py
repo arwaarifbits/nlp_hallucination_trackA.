@@ -20,7 +20,7 @@ def load_model():
 
     print(f"Loading model {MODEL_NAME} on {device}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, device_map="auto", torch_dtype=torch.float16).to(device)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, device_map="auto", torch_dtype=torch.float16)
     print("Model loaded successfully!")
 
     return tokenizer, model
