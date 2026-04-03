@@ -57,34 +57,39 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
         print(f"Processing batch {b+1}/{n_batches}")
         
         for i, row in batch_df.iterrows():
-            # --- AUTO-MAPPING LOGIC FOR HALUEVAL ---
-            # If the user didn't rename columns, we find them automatically
-            current_answer = row.get("model_answer", row.get("answer", None))
-            current_labels = row.get(label_col, row.get("labels", None))
-            current_context = row.get(context_col, row.get("original_prompt", row.get("context", "")))
-            
-            if pd.notna(current_answer):
-                answer_text = str(current_answer)
+            # --- 1. ISOLATED DATA EXTRACTION ---
+            if dataset_name == "halueval":
+                # Specific mapping for HaluEval's unique schema
+                answer_text = str(row.get("answer", ""))
+                current_context = str(row.get("original_prompt", ""))
+                raw_label = row.get("labels", "[]") # Default to empty list string
             else:
-                print(f"[WARNING] No answer found for sample {i}. Generating...")
-                answer_text = generate_answer(row[prompt_col], current_context, tokenizer, model)
+                # Standard mapping for RAGTruth / Default
+                answer_text = str(row.get("model_answer", ""))
+                current_context = str(row.get(context_col, ""))
+                raw_label = row.get(label_col, None)
 
-            # Compute Logits
+            # --- 2. LOGITS CALCULATION (Same for both) ---
             logits_ctx = get_logits(answer_text, tokenizer, model, current_context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
             
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
-            # Label Parsing
+            # --- 3. UNIVERSAL PARSING ---
+            # Now we parse whatever 'raw_label' we extracted above
             label = None
-            if isinstance(current_labels, str):
+            if isinstance(raw_label, str):
                 try:
-                    label = ast.literal_eval(current_labels)
-                except:
-                    label = 1 if str(current_labels).lower() in ['hallucinated', '1'] else 0
+                    # Handles "[{'start': 0...}]" and "[]"
+                    label = ast.literal_eval(raw_label)
+                except (ValueError, SyntaxError):
+                    # Handles binary strings like "hallucinated"
+                    label = 1 if raw_label.lower() in ['hallucinated', '1'] else 0
             else:
-                label = current_labels
+                label = raw_label
 
+            # --- 4. TOKEN MAPPING ---
+            # (The rest of your existing labels_list and save_token_level_csv logic follows)
             # Save per-sample results
             os.makedirs(f"results/{dataset_name}", exist_ok=True)
             sample_filename = f"results/{dataset_name}/token_level_sample_{i}.csv"
