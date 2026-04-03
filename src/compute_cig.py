@@ -57,18 +57,20 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
         print(f"Processing batch {b+1}/{n_batches}")
         
         for i, row in batch_df.iterrows():
-            # --- 1. ISOLATED DATA EXTRACTION ---
+            # --- 1. UNIFIED DATA EXTRACTION ---
+            # Both datasets now use 'model_answer'
+            answer_text = str(row.get("model_answer", ""))
+            
             if dataset_name == "halueval":
-                # Specific mapping for HaluEval's unique schema
-                answer_text = str(row.get("answer", ""))
+                # HaluEval uses 'original_prompt' for the full context
                 current_context = str(row.get("original_prompt", ""))
-                raw_label = row.get("labels", "[]") # Default to empty list string
+                raw_label = row.get("label_hallucination", "[]") 
             else:
-                # Standard mapping for RAGTruth / Default
-                answer_text = str(row.get("model_answer", ""))
-                current_context = str(row.get(context_col, ""))
-                raw_label = row.get(label_col, None)
+                # RAGTruth uses 'context' and 'hallucination_labels'
+                current_context = str(row.get("context", ""))
+                raw_label = row.get("hallucination_labels", None)
 
+                
             # --- 2. LOGITS CALCULATION (Same for both) ---
             logits_ctx = get_logits(answer_text, tokenizer, model, current_context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
