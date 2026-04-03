@@ -165,7 +165,8 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
             
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
-            sample_filename = f"results/token_level_sample_{i}.csv"
+            os.makedirs(f"results/{dataset_name}", exist_ok=True)
+            sample_filename = f"results/{dataset_name}/token_level_sample_{i}.csv"
             
             labels_list = None
 
