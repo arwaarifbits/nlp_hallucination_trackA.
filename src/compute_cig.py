@@ -119,45 +119,48 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
     summary_df.to_csv(summary_path, index=False)
     print(f"Workflow Complete. Summary: {summary_path}")
 
-def convert_spans_to_token_labels(offsets, spans, tokens):
-    """
-    High-precision conversion of spans to token labels.
-    Uses both character offsets and text-fragment matching for robustness.
-    """
-    token_labels = []
-    
-    for i, (token_start, token_end) in enumerate(offsets):
-        # Default label is 0 (Faithful)
-        label = 0
-        
-        # Get the actual text for this token for secondary verification
-        # Clean the 'Ġ' and punctuation for matching
-        token_text = tokens[i].replace('Ġ', ' ').strip().lower()
-        
-        for span in spans:
-            s_start = span['start']
-            s_end = span['end']
-            s_text = span.get('text', '').lower()
+import json
 
-            # Logic A: Standard Offset Overlap
-            # If the token exists within the span indices
-            is_overlap = not (token_end <= s_start or token_start >= s_end)
+def convert_spans_to_token_labels(offsets, spans, tokens=None):
+    """
+    Final PhD-Grade Mapping Logic
+    Converts RAGTruth/HaluEval spans to token-level binary labels.
+    """
+    # 1. Handle JSON string input safely
+    if isinstance(spans, str):
+        try:
+            # RAGTruth uses lowercase true/false/null, so we must use json.loads
+            spans = json.loads(spans.replace("'", '"')) 
+        except:
+            return [0] * len(offsets)
             
-            # Logic B: Text Fragment Safety (Fixes alignment shifts)
-            # If the token is significant (>2 chars) and is inside the span text
-            is_text_match = False
-            if len(token_text) > 2 and token_text in s_text:
-                # To avoid false positives, only match if the offsets are 'close' (within 50 chars)
-                if abs(token_start - s_start) < 50 or abs(token_end - s_end) < 50:
-                    is_text_match = True
+    # 2. If it's a simple string like 'hallucinated' (HaluEval style)
+    if isinstance(spans, str) and spans.lower() == 'hallucinated':
+        return [1] * len(offsets)
 
-            if is_overlap or is_text_match:
-                label = 1
-                break
+    token_labels = []
+    for i, (token_start, token_end) in enumerate(offsets):
+        # Skip special tokens (offsets are 0,0)
+        if token_start == 0 and token_end == 0:
+            token_labels.append(0)
+            continue
+            
+        label = 0
+        # 3. Check for overlap with any span
+        if isinstance(spans, list):
+            for span in spans:
+                s_start = span.get('start', 0)
+                s_end = span.get('end', 0)
+                
+                # Standard overlap logic
+                if not (token_end <= s_start or token_start >= s_end):
+                    label = 1
+                    break
         
         token_labels.append(label)
-    
+        
     return token_labels
+
 
 
 def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
