@@ -99,7 +99,10 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
                 if isinstance(label, list): 
                     encoding = tokenizer(answer_text, return_offsets_mapping=True, return_tensors="pt")
                     offsets = encoding["offset_mapping"][0].tolist()
-                    labels_list = convert_spans_to_token_labels(offsets, label)
+                    # PREDICT TOKENS for text matching
+                    tokens = tokenizer.convert_ids_to_tokens(encoding["input_ids"][0])
+                    # CALL NEW FUNCTION
+                    labels_list = convert_spans_to_token_labels(offsets, label, tokens)
                 else:
                     labels_list = [label] * len(pred_tokens)
 
@@ -116,23 +119,46 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
     summary_df.to_csv(summary_path, index=False)
     print(f"Workflow Complete. Summary: {summary_path}")
 
-def convert_spans_to_token_labels(offsets, spans):
+def convert_spans_to_token_labels(offsets, spans, tokens):
+    """
+    High-precision conversion of spans to token labels.
+    Uses both character offsets and text-fragment matching for robustness.
+    """
     token_labels = []
-    for (token_start, token_end) in offsets:
-        # Ignore special tokens with (0,0) offsets if they exist
-        if token_start == 0 and token_end == 0:
-            token_labels.append(0)
-            continue
-            
+    
+    for i, (token_start, token_end) in enumerate(offsets):
+        # Default label is 0 (Faithful)
         label = 0
+        
+        # Get the actual text for this token for secondary verification
+        # Clean the 'Ġ' and punctuation for matching
+        token_text = tokens[i].replace('Ġ', ' ').strip().lower()
+        
         for span in spans:
-            s_start, s_end = span['start'], span['end']
-            # Overlap check
-            if not (token_end <= s_start or token_start >= s_end):
+            s_start = span['start']
+            s_end = span['end']
+            s_text = span.get('text', '').lower()
+
+            # Logic A: Standard Offset Overlap
+            # If the token exists within the span indices
+            is_overlap = not (token_end <= s_start or token_start >= s_end)
+            
+            # Logic B: Text Fragment Safety (Fixes alignment shifts)
+            # If the token is significant (>2 chars) and is inside the span text
+            is_text_match = False
+            if len(token_text) > 2 and token_text in s_text:
+                # To avoid false positives, only match if the offsets are 'close' (within 50 chars)
+                if abs(token_start - s_start) < 50 or abs(token_end - s_end) < 50:
+                    is_text_match = True
+
+            if is_overlap or is_text_match:
                 label = 1
                 break
+        
         token_labels.append(label)
+    
     return token_labels
+
 
 def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
     # (Kept as fallback logic)
