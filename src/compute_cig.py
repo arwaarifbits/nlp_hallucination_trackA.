@@ -1,7 +1,3 @@
-from cProfile import label
-from multiprocessing import context
-from xml.parsers.expat import model
-
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -41,24 +37,25 @@ def compute_cig(logits_ctx, logits_noctx):
     return cig_scores, pred_tokens[:seq_len]
 
 def save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels=None, filename="results/token_level.csv"):
-    """
-    Save token-level data for analysis
-    """
     tokens = tokenizer.convert_ids_to_tokens(pred_tokens)
     
+    min_len = min(len(tokens), len(cig_scores))
+    if labels is not None:
+        min_len = min(min_len, len(labels))
+    
     data = {
-        "token": tokens,
-        "cig_score": cig_scores
+        "token": tokens[:min_len],
+        "cig_score": cig_scores[:min_len]
     }
     
-    if labels:
-        # labels should match number of tokens
-        data["hallucination_label"] = labels
+    # Using 'is not None' ensures that 0 is saved correctly
+    if labels is not None:
+        data["hallucination_label"] = labels[:min_len]
     
     df = pd.DataFrame(data)
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     df.to_csv(filename, index=False)
-    print(f"Token-level data saved to {filename}")
+    print(f"[SUCCESS] Saved {len(df)} tokens to {filename}")
 
 
 def run_cig_on_dataset(df, dataset_name=None, context_col="context", prompt_col="prompt", label_col="label_hallucination"):
@@ -120,81 +117,67 @@ def run_cig_on_dataset(df, dataset_name=None, context_col="context", prompt_col=
 
 def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt", context_col="context", label_col="label_binary"):
     tokenizer, model = load_model()
-    
     all_results = []
     n_batches = math.ceil(len(df) / batch_size)
     
     for b in range(n_batches):
         batch_df = df.iloc[b*batch_size : (b+1)*batch_size]
-        print(f"Processing batch {b+1}/{n_batches} ({len(batch_df)} samples)")
+        print(f"Processing batch {b+1}/{n_batches}")
         
         for i, row in batch_df.iterrows():
             prompt = row[prompt_col]
-            context = row.get("original_prompt", None) if dataset_name == "halueval" else row.get(context_col, None)
             
-            raw_label = row.get(label_col, None)
-            if isinstance(raw_label, str):
-                try:
-                    label = ast.literal_eval(raw_label)
-                except:
-                    label = None
+            # THE SMART CONTEXT PICKER
+            if dataset_name == "halueval":
+                context = row.get("original_prompt", None)
             else:
-                label = raw_label
+                context = row.get(context_col, None)
+                if context is None and "context" in row:
+                    context = row["context"]
 
-            # Generate answer
+            # GENERATION
             answer_text = generate_answer(prompt, context, tokenizer, model, dataset_name=dataset_name)
-            if len(answer_text.strip()) == 0:
+            if not answer_text or len(answer_text.strip()) == 0:
                 answer_text = prompt if prompt else "N/A"
-            
-            # Tokenize and get offsets
-            encoding = tokenizer(answer_text, return_offsets_mapping=True, return_tensors="pt")
-            offsets = encoding["offset_mapping"][0].tolist()
 
-            # Compute logits
+            # LOGITS & CIG
             logits_ctx = get_logits(answer_text, tokenizer, model, context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
-
-            # Compute CIG
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
-            # Prepare save path
+            # LABELS
+            raw_label = row.get(label_col, None)
+            # Add logic here to ensure label is never None if it exists in the row
+            label = raw_label if raw_label is not None else None
+
+            # FOLDER & FILE PATH
             os.makedirs(f"results/{dataset_name}", exist_ok=True)
             sample_filename = f"results/{dataset_name}/token_level_sample_{i}.csv"
-
-            # Prepare token-level labels
+            
+            # PROCESS LABELS (Span vs Binary)
             labels_list = None
             if label is not None:
-                if isinstance(label, list):  # span labels
-                    token_labels = convert_spans_to_token_labels(offsets, label)
-                    min_len = min(len(pred_tokens), len(cig_scores), len(token_labels))
-                    pred_tokens = pred_tokens[:min_len]
-                    cig_scores = cig_scores[:min_len]
-                    token_labels = token_labels[:min_len]
-                    labels_list = token_labels
+                if isinstance(label, list): 
+                    encoding = tokenizer(answer_text, return_offsets_mapping=True, return_tensors="pt")
+                    offsets = encoding["offset_mapping"][0].tolist()
+                    labels_list = convert_spans_to_token_labels(offsets, label)
                 else:
                     labels_list = [label] * len(pred_tokens)
 
-            # Debug print for first 2 samples
-            if i < 2 and labels_list is not None:
-                print("\n=== TOKEN LABEL DEBUG ===")
-                for j in range(min(10, len(labels_list))):
-                    print(f"Token {j}: Label={labels_list[j]}")
-                print("========================\n")
-            
-            # Save token-level CSV
+            # SAVE
             save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels_list, filename=sample_filename)
 
             all_results.append({
-                "prompt": prompt,
-                "context": context,
+                "prompt": prompt[:100],
                 "sample_csv": sample_filename
             })
     
-    # Save dataset summary CSV
+    # FINAL SUMMARY
     summary_df = pd.DataFrame(all_results)
     summary_path = f"results/{dataset_name}_summary.csv"
     summary_df.to_csv(summary_path, index=False)
-    print(f"Summary CSV saved to {summary_path}")
+    print(f"Workflow Complete. Summary saved to {summary_path}")
+
 
 
 def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
