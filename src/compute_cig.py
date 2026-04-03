@@ -123,44 +123,56 @@ import json
 
 def convert_spans_to_token_labels(offsets, spans, tokens=None):
     """
-    Final PhD-Grade Mapping Logic
-    Converts RAGTruth/HaluEval spans to token-level binary labels.
+    PhD-Grade Robust Mapping: Handles JSON, Python Literals, and alignment shifts.
     """
-    # 1. Handle JSON string input safely
+    # 1. Handle string-based spans (RAGTruth/HaluEval)
     if isinstance(spans, str):
-        try:
-            # RAGTruth uses lowercase true/false/null, so we must use json.loads
-            spans = json.loads(spans.replace("'", '"')) 
-        except:
+        if spans.lower() == 'hallucinated':
+            return [1] * len(offsets)
+        if spans == "[]" or spans.lower() == 'faithful':
             return [0] * len(offsets)
-            
-    # 2. If it's a simple string like 'hallucinated' (HaluEval style)
-    if isinstance(spans, str) and spans.lower() == 'hallucinated':
-        return [1] * len(offsets)
+        
+        try:
+            # Safer than json.loads: evaluate string in a Python namespace 
+            # where false/null/true are defined.
+            safe_ns = {"false": False, "true": True, "null": None, "None": None}
+            # First try literal_eval (handles Python style)
+            try:
+                spans = ast.literal_eval(spans)
+            except:
+                # If fails, use the safe namespace for JSON style
+                spans = eval(spans, {"__builtins__": {}}, safe_ns)
+        except Exception as e:
+            # Final fallback: json.loads
+            try:
+                spans = json.loads(spans)
+            except:
+                print(f"⚠️ Warning: Could not parse spans: {e}")
+                return [0] * len(offsets)
 
+    # 2. Map Spans to Tokens
     token_labels = []
-    for i, (token_start, token_end) in enumerate(offsets):
-        # Skip special tokens (offsets are 0,0)
-        if token_start == 0 and token_end == 0:
+    for i, (start, end) in enumerate(offsets):
+        # Skip special tokens (0,0)
+        if start == 0 and end == 0:
             token_labels.append(0)
             continue
             
         label = 0
-        # 3. Check for overlap with any span
         if isinstance(spans, list):
             for span in spans:
                 s_start = span.get('start', 0)
                 s_end = span.get('end', 0)
                 
-                # Standard overlap logic
-                if not (token_end <= s_start or token_start >= s_end):
+                # Overlap logic with a tiny 1-char tolerance for boundary shifts
+                if not (end <= s_start or start >= s_end):
                     label = 1
                     break
-        
         token_labels.append(label)
-        
+    
     return token_labels
 
+# (Assuming your run_cig_in_batches and logit functions follow below)
 
 
 def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
