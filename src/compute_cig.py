@@ -200,7 +200,7 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
             })
     
     summary_df = pd.DataFrame(all_results)
-    summary_df.to_csv("results/summary.csv", index=False)
+    summary_df.to_csv(f"results/{dataset_name}_summary.csv", index=False)
     print("Summary CSV saved to results/summary.csv")
 
 
