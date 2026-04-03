@@ -118,7 +118,6 @@ def run_cig_on_dataset(df, dataset_name=None, context_col="context", prompt_col=
     summary_df.to_csv(f"results/{dataset_name}_summary.csv", index=False)
     print(f"Summary CSV saved to results/{dataset_name}_summary.csv")
 
-
 def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt", context_col="context", label_col="label_binary"):
     tokenizer, model = load_model()
     
@@ -131,13 +130,9 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
         
         for i, row in batch_df.iterrows():
             prompt = row[prompt_col]
-            if dataset_name == "halueval":
-                context = row.get("original_prompt", None)
-            else:
-                context = row.get(context_col, None)
+            context = row.get("original_prompt", None) if dataset_name == "halueval" else row.get(context_col, None)
             
             raw_label = row.get(label_col, None)
-
             if isinstance(raw_label, str):
                 try:
                     label = ast.literal_eval(raw_label)
@@ -146,51 +141,47 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
             else:
                 label = raw_label
 
+            # Generate answer
             answer_text = generate_answer(prompt, context, tokenizer, model, dataset_name=dataset_name)
-
             if len(answer_text.strip()) == 0:
-                continue
+                answer_text = prompt if prompt else "N/A"
             
-            encoding = tokenizer(
-                answer_text,
-                return_offsets_mapping=True,
-                return_tensors="pt"
-            )
-
+            # Tokenize and get offsets
+            encoding = tokenizer(answer_text, return_offsets_mapping=True, return_tensors="pt")
             offsets = encoding["offset_mapping"][0].tolist()
 
-
+            # Compute logits
             logits_ctx = get_logits(answer_text, tokenizer, model, context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
-            
+
+            # Compute CIG
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
+            # Prepare save path
             os.makedirs(f"results/{dataset_name}", exist_ok=True)
             sample_filename = f"results/{dataset_name}/token_level_sample_{i}.csv"
-            
-            labels_list = None
 
+            # Prepare token-level labels
+            labels_list = None
             if label is not None:
                 if isinstance(label, list):  # span labels
                     token_labels = convert_spans_to_token_labels(offsets, label)
-
-                    # Ensure same length as pred_tokens
                     min_len = min(len(pred_tokens), len(cig_scores), len(token_labels))
-
                     pred_tokens = pred_tokens[:min_len]
                     cig_scores = cig_scores[:min_len]
                     token_labels = token_labels[:min_len]
-
                     labels_list = token_labels
                 else:
                     labels_list = [label] * len(pred_tokens)
 
+            # Debug print for first 2 samples
             if i < 2 and labels_list is not None:
                 print("\n=== TOKEN LABEL DEBUG ===")
                 for j in range(min(10, len(labels_list))):
                     print(f"Token {j}: Label={labels_list[j]}")
                 print("========================\n")
             
+            # Save token-level CSV
             save_token_level_csv(tokenizer, cig_scores, pred_tokens, labels_list, filename=sample_filename)
 
             all_results.append({
@@ -199,34 +190,30 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
                 "sample_csv": sample_filename
             })
     
+    # Save dataset summary CSV
     summary_df = pd.DataFrame(all_results)
-    summary_df.to_csv(f"results/{dataset_name}_summary.csv", index=False)
-    print(f"Summary CSV saved to results/{dataset_name}_summary.csv")
+    summary_path = f"results/{dataset_name}_summary.csv"
+    summary_df.to_csv(summary_path, index=False)
+    print(f"Summary CSV saved to {summary_path}")
 
 
 def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
     """
     Generate answer using model.
-    For HaluEval, automatically splits 'Knowledge:' from the question
-    to avoid repeating the passage in the output.
+    For HaluEval, automatically splits 'Knowledge:' from the question.
     """
     if dataset_name == "halueval" and context:
         # Split context into knowledge and question
         if context.startswith("Knowledge:"):
-            # Find the position of the last "Question:" in context
             split_pos = context.rfind("Question:")
             if split_pos != -1:
                 knowledge = context[len("Knowledge:"):split_pos].strip()
-                question_in_context = context[split_pos:].strip()
-                # Use knowledge as context, prompt as question
                 input_text = knowledge + "\n" + prompt
             else:
-                # fallback: use full context
                 input_text = context + "\n" + prompt
         else:
             input_text = context + "\n" + prompt
     else:
-        # Normal case: just prepend context if available
         input_text = (context + "\n" if context else "") + prompt
 
     inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
@@ -236,23 +223,18 @@ def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, datas
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            repetition_penalty=1.2,      
-            no_repeat_ngram_size=3       
+            repetition_penalty=1.2,
+            no_repeat_ngram_size=3
         )
 
     generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-    # Extract only the generated part (after input_text)
-    # Safe slicing
+    # Extract only the generated part
     if generated_text.startswith(input_text):
         answer_text = generated_text[len(input_text):]
     else:
         answer_text = generated_text
 
-    if len(answer_text.strip()) == 0:
-        print(f"[WARNING] Empty generation at sample {i} — using prompt as fallback")
-        answer_text = prompt if prompt else "N/A"
-    
     return answer_text.strip()
 
 
