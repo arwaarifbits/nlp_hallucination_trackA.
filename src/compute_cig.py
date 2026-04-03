@@ -5,6 +5,7 @@ from src.model_utils import load_model, get_logits
 import os
 import math
 import ast
+import json
 
 def compute_cig(logits_ctx, logits_noctx):
     """
@@ -14,7 +15,6 @@ def compute_cig(logits_ctx, logits_noctx):
     probs_ctx = F.softmax(logits_ctx, dim=-1)
     probs_noctx = F.softmax(logits_noctx, dim=-1)
 
-    # We take the argmax of the context probabilities as the predicted tokens
     pred_tokens = torch.argmax(probs_ctx, dim=-1) 
 
     seq_len = min(probs_ctx.shape[0], probs_noctx.shape[0])
@@ -25,7 +25,6 @@ def compute_cig(logits_ctx, logits_noctx):
         p_ctx = max(probs_ctx[t, token_id].item(), 1e-12)
         p_noctx = max(probs_noctx[t, token_id].item(), 1e-12)
         
-        # Mathematical definition for Track A
         cig = torch.log(torch.tensor(p_ctx)) - torch.log(torch.tensor(p_noctx))
         cig_scores.append(cig.item())
 
@@ -58,37 +57,33 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
         print(f"Processing batch {b+1}/{n_batches}")
         
         for i, row in batch_df.iterrows():
-            # --- PRIMARY CHANGE: Use dataset's model_answer ---
-            if "model_answer" in row and pd.notna(row["model_answer"]):
-                answer_text = str(row["model_answer"])
+            # --- AUTO-MAPPING LOGIC FOR HALUEVAL ---
+            # If the user didn't rename columns, we find them automatically
+            current_answer = row.get("model_answer", row.get("answer", None))
+            current_labels = row.get(label_col, row.get("labels", None))
+            current_context = row.get(context_col, row.get("original_prompt", row.get("context", "")))
+            
+            if pd.notna(current_answer):
+                answer_text = str(current_answer)
             else:
-                print(f"[WARNING] No model_answer for sample {i}. Falling back to generation.")
-                temp_context = row.get("original_prompt", row.get(context_col, ""))
-                answer_text = generate_answer(row[prompt_col], temp_context, tokenizer, model, dataset_name=dataset_name)
+                print(f"[WARNING] No answer found for sample {i}. Generating...")
+                answer_text = generate_answer(row[prompt_col], current_context, tokenizer, model)
 
-            # Determine Context
-            if dataset_name == "halueval":
-                context = row.get("original_prompt", "")
-            else:
-                context = row.get(context_col, row.get("context", ""))
-
-            # Compute Logits based on the FIXED answer_text
-            logits_ctx = get_logits(answer_text, tokenizer, model, context)
+            # Compute Logits
+            logits_ctx = get_logits(answer_text, tokenizer, model, current_context)
             logits_noctx = get_logits(answer_text, tokenizer, model)
             
             cig_scores, pred_tokens = compute_cig(logits_ctx[0], logits_noctx[0])
 
             # Label Parsing
-            raw_label = row.get(label_col, None)
             label = None
-            if isinstance(raw_label, str):
+            if isinstance(current_labels, str):
                 try:
-                    label = ast.literal_eval(raw_label)
+                    label = ast.literal_eval(current_labels)
                 except:
-                    # Handle binary strings if necessary
-                    label = 1 if raw_label.lower() in ['hallucinated', '1'] else 0
+                    label = 1 if str(current_labels).lower() in ['hallucinated', '1'] else 0
             else:
-                label = raw_label
+                label = current_labels
 
             # Save per-sample results
             os.makedirs(f"results/{dataset_name}", exist_ok=True)
@@ -99,9 +94,7 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
                 if isinstance(label, list): 
                     encoding = tokenizer(answer_text, return_offsets_mapping=True, return_tensors="pt")
                     offsets = encoding["offset_mapping"][0].tolist()
-                    # PREDICT TOKENS for text matching
                     tokens = tokenizer.convert_ids_to_tokens(encoding["input_ids"][0])
-                    # CALL NEW FUNCTION
                     labels_list = convert_spans_to_token_labels(offsets, label, tokens)
                 else:
                     labels_list = [label] * len(pred_tokens)
@@ -110,7 +103,7 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
 
             all_results.append({
                 "index": i,
-                "prompt": row[prompt_col][:100],
+                "prompt": str(row.get(prompt_col, ""))[:100],
                 "sample_csv": sample_filename
             })
     
@@ -119,41 +112,23 @@ def run_cig_in_batches(df, dataset_name=None, batch_size=10, prompt_col="prompt"
     summary_df.to_csv(summary_path, index=False)
     print(f"Workflow Complete. Summary: {summary_path}")
 
-import json
-
 def convert_spans_to_token_labels(offsets, spans, tokens=None):
-    """
-    PhD-Grade Robust Mapping: Handles JSON, Python Literals, and alignment shifts.
-    """
-    # 1. Handle string-based spans (RAGTruth/HaluEval)
     if isinstance(spans, str):
-        if spans.lower() == 'hallucinated':
-            return [1] * len(offsets)
-        if spans == "[]" or spans.lower() == 'faithful':
-            return [0] * len(offsets)
+        if spans.lower() == 'hallucinated': return [1] * len(offsets)
+        if spans == "[]" or spans.lower() == 'faithful': return [0] * len(offsets)
         
         try:
-            # Safer than json.loads: evaluate string in a Python namespace 
-            # where false/null/true are defined.
-            safe_ns = {"false": False, "true": True, "null": None, "None": None}
-            # First try literal_eval (handles Python style)
+            safe_ns = {"false": False, "true": True, "null": None}
             try:
                 spans = ast.literal_eval(spans)
             except:
-                # If fails, use the safe namespace for JSON style
                 spans = eval(spans, {"__builtins__": {}}, safe_ns)
-        except Exception as e:
-            # Final fallback: json.loads
-            try:
-                spans = json.loads(spans)
-            except:
-                print(f"⚠️ Warning: Could not parse spans: {e}")
-                return [0] * len(offsets)
+        except:
+            try: spans = json.loads(spans)
+            except: return [0] * len(offsets)
 
-    # 2. Map Spans to Tokens
     token_labels = []
     for i, (start, end) in enumerate(offsets):
-        # Skip special tokens (0,0)
         if start == 0 and end == 0:
             token_labels.append(0)
             continue
@@ -163,20 +138,13 @@ def convert_spans_to_token_labels(offsets, spans, tokens=None):
             for span in spans:
                 s_start = span.get('start', 0)
                 s_end = span.get('end', 0)
-                
-                # Overlap logic with a tiny 1-char tolerance for boundary shifts
                 if not (end <= s_start or start >= s_end):
                     label = 1
                     break
         token_labels.append(label)
-    
     return token_labels
 
-# (Assuming your run_cig_in_batches and logit functions follow below)
-
-
-def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100, dataset_name=None):
-    # (Kept as fallback logic)
+def generate_answer(prompt, context, tokenizer, model, max_new_tokens=100):
     input_text = (str(context) + "\n" if context else "") + str(prompt)
     inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
     with torch.no_grad():
