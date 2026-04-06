@@ -1,72 +1,115 @@
+# src/temporal.py
 import numpy as np
 import matplotlib.pyplot as plt
-import os
+import matplotlib.patches as mpatches
 from scipy.signal import savgol_filter
+from scipy.stats import ttest_ind
 
-def extract_temporal_features(ig_sequence, window=5):
+def extract_temporal_features(ig_sequence: np.ndarray, window: int = 5):
     """
-    Computes statistical 'momentum' for each token.
-    ig_sequence: np.ndarray of IG values from Phase 2.
+    For each token i, compute features from the preceding window of IG values.
+    This captures the "trajectory" of IG leading up to each token.
     """
     features = []
     for i in range(len(ig_sequence)):
-        # Define look-back window (e.g., last 5 tokens)
         start = max(0, i - window)
-        window_ig = ig_sequence[start : i + 1]
-        
-        # Calculate features
-        # Trend is the slope of the line: negative slope = declining grounding
-        trend = 0
-        if len(window_ig) > 1:
-            trend = np.polyfit(range(len(window_ig)), window_ig, 1)[0]
-            
+        w = ig_sequence[start:i + 1]
+        if len(w) >= 2:
+            slope = np.polyfit(range(len(w)), w, 1)[0]
+        else:
+            slope = 0.0
         features.append({
-            "mean_ig": np.mean(window_ig),
-            "std_ig": np.std(window_ig),
-            "min_ig": np.min(window_ig),
-            "trend": trend,
-            "current_ig": ig_sequence[i]
+            "position": i,
+            "current_ig": ig_sequence[i],
+            "mean_ig_window": float(np.mean(w)),
+            "std_ig_window": float(np.std(w)),
+            "min_ig_window": float(np.min(w)),
+            "slope": float(slope),           # negative slope = IG declining = danger signal
         })
     return features
 
-def plot_ig_with_labels(ig_values, tokens, labels, title="IG_Temporal_Analysis"):
+def analyze_precursor_patterns(all_ig_arrays, all_label_arrays, window=5, k=3):
     """
-    The 'Money Shot' for your midsem report.
-    Shows the IG curve with red blocks over hallucinated tokens.
+    Key analysis: in the k tokens BEFORE a hallucinated span,
+    is the average IG significantly lower than before faithful spans?
+    
+    all_ig_arrays: list of np.arrays (one per sample)
+    all_label_arrays: list of np.arrays of 0/1 labels
     """
-    # Ensure results directory exists
-    if not os.path.exists("results"):
-        os.makedirs("results")
+    pre_hal_igs = []    # IG values in window before hallucinated tokens
+    pre_faith_igs = []  # IG values in window before faithful tokens
 
-    fig, ax = plt.subplots(figsize=(14, 4))
-    x = range(len(ig_values))
-    
-    # 1. Plot Raw IG (Light blue)
-    ax.plot(x, ig_values, alpha=0.3, color='blue', label='Raw IG')
-    
-    # 2. Plot Smoothed IG (Dark blue) - Using Savitzky-Golay filter
-    # This helps see the general trend through the 'noise' of individual tokens
-    window_length = min(11, len(ig_values))
-    if window_length % 2 == 0: window_length -= 1 # Must be odd
-    
-    if len(ig_values) > 5:
-        smoothed = savgol_filter(ig_values, window_length, 3)
-        ax.plot(x, smoothed, color='blue', linewidth=2, label='Smoothed Trend')
-    
-    # 3. Highlight hallucinated spans (Red background)
-    # labels should be binary (1 = hallucination)
-    for i in range(min(len(ig_values), len(labels))):
-        if labels[i] == 1:
-            ax.axvspan(i - 0.5, i + 0.5, alpha=0.3, color='red')
+    for ig, labels in zip(all_ig_arrays, all_label_arrays):
+        min_len = min(len(ig), len(labels))
+        ig, labels = ig[:min_len], labels[:min_len]
+        
+        for i in range(k, len(labels)):
+            precursor_mean = np.mean(ig[i-k:i])  # mean IG in k preceding tokens
+            if labels[i] == 1:
+                pre_hal_igs.append(precursor_mean)
+            else:
+                pre_faith_igs.append(precursor_mean)
 
-    # 4. Formatting
-    ax.axhline(0, color='black', linestyle='--', alpha=0.5)
-    ax.set_xlabel("Token Position")
-    ax.set_ylabel("Information Gain (IG)")
-    ax.set_title(title.replace("_", " "))
-    ax.legend()
-    
+    # Statistical test
+    t_stat, p_val = ttest_ind(pre_hal_igs, pre_faith_igs, alternative='less')
+    print(f"Mean IG before hallucinated tokens: {np.mean(pre_hal_igs):.4f}")
+    print(f"Mean IG before faithful tokens:     {np.mean(pre_faith_igs):.4f}")
+    print(f"t-statistic: {t_stat:.4f}, p-value: {p_val:.4f}")
+    return pre_hal_igs, pre_faith_igs, p_val
+
+def plot_ig_sequence(ig_values, tokens, labels, sample_id=0, save_dir="results"):
+    """
+    Plot IG over token positions, shading hallucinated spans in red.
+    """
+    fig, ax = plt.subplots(figsize=(16, 4))
+    x = np.arange(len(ig_values))
+
+    # Raw IG as thin line
+    ax.plot(x, ig_values, color='#378ADD', alpha=0.4, linewidth=1, label='Raw IG')
+
+    # Smoothed IG
+    if len(ig_values) > 11:
+        win = min(11, len(ig_values) // 2 * 2 + 1)
+        smoothed = savgol_filter(ig_values, win, 3)
+        ax.plot(x, smoothed, color='#185FA5', linewidth=2, label='Smoothed IG')
+
+    # Shade hallucinated regions
+    in_span = False
+    for i, label in enumerate(labels):
+        if label == 1 and not in_span:
+            span_start = i
+            in_span = True
+        elif label == 0 and in_span:
+            ax.axvspan(span_start - 0.5, i - 0.5, alpha=0.25, color='#E24B4A',
+                      label='Hallucinated' if span_start == min(np.where(np.array(labels)==1)[0]) else "")
+            in_span = False
+    if in_span:
+        ax.axvspan(span_start - 0.5, len(labels) - 0.5, alpha=0.25, color='#E24B4A')
+
+    ax.axhline(0, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+
+    # Token labels on x-axis (every 5th to avoid crowding)
+    ax.set_xticks(x[::5])
+    ax.set_xticklabels([tokens[i].strip() for i in x[::5]], rotation=45, ha='right', fontsize=8)
+
+    ax.set_xlabel("Token position", fontsize=11)
+    ax.set_ylabel("Information Gain", fontsize=11)
+    ax.set_title(f"Token-level IG with hallucinated spans — sample {sample_id}", fontsize=12)
+    ax.legend(fontsize=10)
     plt.tight_layout()
-    plt.savefig(f"results/{title}.png", dpi=150)
-    print(f"Plot saved to results/{title}.png")
-    plt.show()
+    plt.savefig(f"{save_dir}/ig_temporal_sample_{sample_id}.png", dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {save_dir}/ig_temporal_sample_{sample_id}.png")
+
+def plot_precursor_distributions(pre_hal_igs, pre_faith_igs, save_dir="results"):
+    """Histogram comparing IG distributions before hallucinated vs faithful tokens."""
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.hist(pre_faith_igs, bins=50, alpha=0.6, color='#378ADD', label='Before faithful tokens', density=True)
+    ax.hist(pre_hal_igs, bins=50, alpha=0.6, color='#E24B4A', label='Before hallucinated tokens', density=True)
+    ax.set_xlabel("Mean IG in preceding window", fontsize=11)
+    ax.set_ylabel("Density", fontsize=11)
+    ax.set_title("Precursor IG distributions: faithful vs hallucinated", fontsize=12)
+    ax.legend(fontsize=10)
+    plt.tight_layout()
+    plt.savefig(f"{save_dir}/precursor_distributions.png", dpi=150)
+    plt.close()

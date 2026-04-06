@@ -1,56 +1,53 @@
+# src/baselines.py
 import numpy as np
-import torch
 from selfcheckgpt.modeling_selfcheck import SelfCheckBERTScore
+import torch
 
-# --- Baseline 1: Entropy-Only ---
-def compute_entropy_baseline(h_with_ctx):
+def entropy_only_hallucination_score(H_with_ctx: np.ndarray) -> np.ndarray:
     """
-    Standard Baseline: Just uses the uncertainty of the model 
-    when it has access to the context.
+    Baseline: raw entropy WITH context as hallucination signal.
+    Higher entropy → more likely hallucinated.
+    No comparison to without-context entropy.
     """
-    # We return it directly. For AUROC, higher entropy should 
-    # correlate with higher hallucination probability.
-    return np.array(h_with_ctx)
+    return H_with_ctx  # used directly as the score
 
-# --- Baseline 2: SelfCheckGPT (Consistency) ---
+
 class SelfCheckBaseline:
-    def __init__(self, device="mps"):
-        # BERTScore is used to check if the response is consistent 
-        # with other stochastic samples from the same model.
-        print("Initializing SelfCheckGPT (BERTScore variant)...")
-        self.selfcheck = SelfCheckBERTScore(rescale_with_baseline=True)
-        self.device = device
+    """
+    SelfCheckGPT: generate N samples stochastically, check if they are
+    consistent with each other. Inconsistent = hallucinated.
+    """
+    def __init__(self):
+        self.checker = SelfCheckBERTScore(rescale_with_baseline=True)
 
-    def get_stochastic_samples(self, model, tokenizer, query, context, num_samples=3):
-        """
-        Generates 'N' alternative answers to see if the model 
-        contradicts itself.
-        """
-        prompt = f"Context: {context}\nQuestion: {query}\nAnswer:"
-        inputs = tokenizer(prompt, return_tensors="pt").to(self.device)
-        
+    def generate_samples(self, model, tokenizer, prompt: str, 
+                         num_samples: int = 5, max_new_tokens: int = 100,
+                         device: str = "mps"):
+        """Generate N diverse responses using temperature sampling."""
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
         samples = []
         for _ in range(num_samples):
-            # Use high temperature (0.7 - 1.0) to get diverse samples
-            output_tokens = model.generate(
-                **inputs, 
-                max_new_tokens=50, 
-                do_sample=True, 
-                temperature=0.8,
-                pad_token_id=tokenizer.eos_token_id
-            )
-            # Decode only the generated part
-            gen_text = tokenizer.decode(output_tokens[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-            samples.append(gen_text)
+            with torch.no_grad():
+                out = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=1.0,
+                    top_p=0.9
+                )
+            decoded = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:],
+                                       skip_special_tokens=True)
+            samples.append(decoded)
         return samples
 
-    def compute_selfcheck(self, sentences, sampled_passages):
+    def score(self, sentences: list, sampled_passages: list) -> np.ndarray:
         """
-        Compares the original sentences against the stochastic samples.
-        Low similarity = Hallucination.
+        sentences: list of sentence strings from the primary response
+        sampled_passages: list of full stochastic sample strings
+        Returns: array of per-sentence hallucination scores
         """
-        sent_scores = self.selfcheck.predict(
+        scores = self.checker.predict(
             sentences=sentences,
             sampled_passages=sampled_passages
         )
-        return sent_scores # Higher score = More likely to be a hallucination
+        return np.array(scores)
