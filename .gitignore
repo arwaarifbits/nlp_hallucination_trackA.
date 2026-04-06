@@ -6,4 +6,3 @@ __pycache__/
 *.log
 venv/
 .ipynb_checkpoints/
-data/raw/ragtruth.csv
