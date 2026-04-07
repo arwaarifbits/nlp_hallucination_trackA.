@@ -40,14 +40,6 @@ def spearman_rho(scores, labels):
     rho, _ = spearmanr(scores, labels)
     return round(float(rho), 4)
 
-def safe_auroc(labels, scores):
-    """Returns NaN instead of crashing if only one class present."""
-    scores = np.nan_to_num(scores, nan=0.0)
-    if len(np.unique(labels)) < 2:
-        print("  WARNING: Only one class in labels — AUROC undefined")
-        return float('nan')
-    return roc_auc_score(labels, scores)
-
 def smooth_scores(scores: np.ndarray, window: int = 3) -> np.ndarray:
     """Apply a sliding window average to token-level scores."""
     if len(scores) < window:
@@ -98,7 +90,7 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
         if dataset_name == "ragtruth":
             query   = sample["query"]                    
             context = sample["context"]       
-            variations.append((sample["response"], sample["labels"]))
+            variations.append((sample["response"], np.array(sample["labels"])))
         else:
             query   = sample["question"]
             context = sample["knowledge"]
@@ -280,17 +272,22 @@ def main():
     sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=10)
-    ragtruth = ragtruth.shuffle(seed=42)
+    #ragtruth = load_ragtruth(max_samples=10)
+    # In main.py, inside main()
+    #    Instead of: ragtruth = load_ragtruth(max_samples=10)
+    # Use this to find rows with hallucinations:
+    full_ragtruth = load_ragtruth()
+    # Filter for samples where labels is NOT an empty list
+    hal_samples = full_ragtruth.filter(lambda x: len(ast.literal_eval(x['labels']) if isinstance(x['labels'], str) else x['labels']) > 0)
+    ragtruth = hal_samples.select(range(10))
     halueval = load_halueval(max_samples=10)
-    halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
     print("Collecting metrics on RAGTruth...")
-    rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=10)
+    rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=150)
 
     print("Collecting metrics on HaluEval...")
-    hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=10)
+    hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=150)
 
     # ── Run experiments ───────────────────────────────────────────
     df_rt = run_all_experiments(rt_data, "ragtruth")
@@ -305,7 +302,7 @@ def main():
         rt_scores = np.nan_to_num(rt_data["tokens"][m_name], nan=0.0)
         hv_scores = np.nan_to_num(hv_data["tokens"][m_name], nan=0.0)
         
-        rt_auroc = safe_auroc(rt_labels, rt_scores)
+        rt_auroc = roc_auc_score(rt_labels, rt_scores)
         hv_auroc = roc_auc_score(hv_labels, hv_scores)
 
         drop = rt_auroc - hv_auroc
@@ -315,32 +312,24 @@ def main():
     # ── E5: Hallucination type breakdown (RAGTruth only) ──────────
     print("\n── E5: Hallucination type breakdown ──")
     
-    # We target 'labels' because we know that's where RAGTruth hides the 'label_type'
-    if "labels" in ragtruth.column_names:
-        print(f"  Extracting nested 'label_type' from RAGTruth labels...")
+    # Check for common column names in RAGTruth
+    possible_fields = ["type", "hal_type", "label", "category"]
+    type_field = next((f for f in possible_fields if f in ragtruth.column_names), None)
+
+    if type_field:
+        print(f"  Using field: {type_field}")
+        unique_types = set(ragtruth[type_field])
+        print(f"  Unique values: {unique_types}")
         
         comp_per_sample = rt_data["per_sample"]["composite"]
         label_per_sample = rt_data["per_sample"]["labels"]
-        
-        # This function handles the ast.literal_eval(sample['labels']) internally
         type_results = auroc_by_haltype(ragtruth, comp_per_sample, label_per_sample)
         
-        if type_results:
-            for t_name, res in type_results.items():
-                auroc_val = res.get('auroc', 'N/A')
-                t_count = res.get('token_count', 0)
-                print(f"  - {t_name}: AUROC={auroc_val} (Tokens: {t_count})")
-            
-            # Save to results folder
-            df_e5 = pd.DataFrame(type_results).T
-            df_e5.to_csv("results/E5_type_breakdown.csv")
-            print("  ✅ E5 results saved to results/E5_type_breakdown.csv")
-        else:
-            print("  ⚠️ E5: No categories found. Check if the dataset contains hallucinations.")
+        for t_name, res in type_results.items():
+            print(f"  {t_name}: AUROC={res['auroc']}, count={res['count']}")
+        pd.DataFrame(type_results).T.to_csv("results/E5_type_breakdown.csv")
     else:
-        print("  ❌ Skipping E5: 'labels' column not found in RAGTruth.")
-
-
+        print("  Skipping E5: Could not find a hallucination type column in RAGTruth.")
 
     # ── E6–E8: SOTA gap table ────────────────────────────────────
     print("\n── E6–E8: SOTA gap ──")
@@ -354,8 +343,8 @@ def main():
     rt_composite = build_composite(cleaned_tokens, rt_labels, mode="variance_weight")
     rt_composite = np.nan_to_num(rt_composite, nan=0.0) # Final safety check
 
-    our_auroc   = safe_auroc(rt_labels, rt_composite)
-    ent_auroc   = safe_auroc(rt_labels, cleaned_tokens["EntOnly"])
+    our_auroc   = roc_auc_score(rt_labels, rt_composite)
+    ent_auroc   = roc_auc_score(rt_labels, cleaned_tokens["EntOnly"])
     lumina_auroc = 0.87
     gap_closed  = (our_auroc - ent_auroc) / (lumina_auroc - ent_auroc) * 100
     print(f"  Entropy baseline: {ent_auroc:.4f}")

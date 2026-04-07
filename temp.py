@@ -1,19 +1,16 @@
-import pandas as pd
+# temp_check.py
+from src.utils import load_ragtruth, align_labels_to_tokens
+from transformers import AutoTokenizer
 
-# Load your local file
-df = pd.read_csv("data/halueval/halueval.csv")
+tok = AutoTokenizer.from_pretrained("facebook/opt-1.3b")
+ds = load_ragtruth(max_samples=5)
 
-print("--- HaluEval Dataset Statistics ---")
-print(f"Total Rows: {len(df)}")
-
-# Check if you have separate columns for right and hallucinated answers
-if 'right_answer' in df.columns and 'hallucinated_answer' in df.columns:
-    print(f"Faithful Samples: {len(df)} (from 'right_answer' column)")
-    print(f"Hallucinated Samples: {len(df)} (from 'hallucinated_answer' column)")
-    print("Total usable data points: ", len(df) * 2)
-
-# If your CSV uses a 'label' column (0 = faithful, 1 = hallucinated)
-elif 'label' in df.columns:
-    counts = df['label'].value_counts()
-    print(f"Faithful (0): {counts.get(0, 0)}")
-    print(f"Hallucinated (1): {counts.get(1, 0)}")
+print("Columns:", ds.column_names)
+for i in range(min(3, len(ds))):
+    s = ds[i]
+    print(f"\n--- Sample {i} ---")
+    print("Labels raw:", s["labels"])
+    response = s["response"]
+    token_labels = align_labels_to_tokens(response, s["labels"], tok)
+    print("Token labels sum:", token_labels.sum(), "/ total:", len(token_labels))
+    print("Has hallucinated tokens:", token_labels.sum() > 0)

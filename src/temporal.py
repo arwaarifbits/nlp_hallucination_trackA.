@@ -113,3 +113,98 @@ def plot_precursor_distributions(pre_hal_igs, pre_faith_igs, save_dir="results")
     plt.tight_layout()
     plt.savefig(f"{save_dir}/precursor_distributions.png", dpi=150)
     plt.close()
+
+
+def compute_temporal_precedence(all_metric_arrays: dict,
+                                 all_label_arrays: list,
+                                 window_range=(-3, 1)) -> dict:
+    """
+    For each hallucinated span's first token t, collect metric values
+    at positions t-3, t-2, t-1, t, t+1.
+    
+    all_metric_arrays: dict of {metric_name: list of np.arrays (one per sample)}
+    all_label_arrays: list of binary np.arrays (one per sample)
+    window_range: (start_offset, end_offset) inclusive
+    
+    Returns dict: {metric_name: {offset: [values...]}}
+    """
+    offsets = list(range(window_range[0], window_range[1] + 1))
+    metric_names = list(all_metric_arrays.keys())
+    
+    # Initialize storage
+    results = {m: {o: [] for o in offsets} for m in metric_names}
+
+    n_samples = len(all_label_arrays)
+
+    for sample_idx in range(n_samples):
+        labels = all_label_arrays[sample_idx]
+
+        # Find first token of each hallucinated span
+        in_span = False
+        first_hal_positions = []
+        for i, lab in enumerate(labels):
+            if lab == 1 and not in_span:
+                first_hal_positions.append(i)
+                in_span = True
+            elif lab == 0:
+                in_span = False
+
+        for t in first_hal_positions:
+            for offset in offsets:
+                pos = t + offset
+                if pos < 0 or pos >= len(labels):
+                    continue
+                for m_name in metric_names:
+                    arr = all_metric_arrays[m_name][sample_idx]
+                    if pos < len(arr):
+                        results[m_name][offset].append(arr[pos])
+
+    # Compute means
+    means = {m: {} for m in metric_names}
+    for m in metric_names:
+        for o in offsets:
+            vals = results[m][o]
+            means[m][o] = float(np.mean(vals)) if vals else float('nan')
+
+    return means
+
+def plot_temporal_precedence(means: dict, save_dir="results"):
+    """
+    Line plot of mean metric value at t-3 to t+1.
+    This is the exact plot the rubric requires.
+    """
+    import matplotlib.pyplot as plt
+    
+    offsets = sorted(list(list(means.values())[0].keys()))
+    x_labels = [f"t{o:+d}" if o != 0 else "t (onset)" for o in offsets]
+    
+    colors = ['#185FA5', '#E24B4A', '#1D9E75', '#BA7517', '#534AB7']
+    
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    for (m_name, offset_dict), color in zip(means.items(), colors):
+        y = [offset_dict[o] for o in offsets]
+        ax.plot(range(len(offsets)), y, marker='o', linewidth=2,
+                markersize=7, label=m_name, color=color)
+        
+        # Mark the peak
+        finite_y = [(i, v) for i, v in enumerate(y) if not np.isnan(v)]
+        if finite_y:
+            # For hallucination scores: peak = highest value
+            peak_i, peak_v = max(finite_y, key=lambda x: x[1])
+            ax.annotate(f"peak", xy=(peak_i, peak_v),
+                       xytext=(peak_i, peak_v + 0.02),
+                       fontsize=8, ha='center', color=color)
+
+    ax.axvline(x=offsets.index(0), color='gray', linestyle='--',
+               alpha=0.7, linewidth=1, label='t (first hallucinated token)')
+    ax.set_xticks(range(len(offsets)))
+    ax.set_xticklabels(x_labels, fontsize=11)
+    ax.set_xlabel("Position relative to first hallucinated token", fontsize=11)
+    ax.set_ylabel("Mean metric score (↑ = hallucination signal)", fontsize=11)
+    ax.set_title("Temporal precedence: does signal peak before hallucination onset?", fontsize=12)
+    ax.legend(fontsize=10, loc='upper left')
+    plt.tight_layout()
+    plt.savefig(f"{save_dir}/temporal_precedence.png", dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved temporal precedence plot.")

@@ -1,8 +1,10 @@
 # src/evaluate.py
 import numpy as np
+import ast
+import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 from scipy.stats import mannwhitneyu, pointbiserialr
-import pandas as pd
+
 
 def evaluate_metric(scores: np.ndarray, labels: np.ndarray, metric_name: str = "IG") -> dict:
     """
@@ -63,3 +65,75 @@ def compile_results_table(all_results: list) -> pd.DataFrame:
     df = pd.DataFrame(all_results)
     df = df.set_index("Metric")
     return df
+
+
+def auroc_by_haltype(ds_ragtruth, composite_scores_per_sample, label_arrays_per_sample):
+    """
+    Parses RAGTruth CSV 'labels' string to extract 'label_type' and compute AUROC per category.
+    """
+    type_scores = {} # {type_name: {"scores": [], "labels": []}}
+
+    # DEBUG: Check how many samples we are actually processing
+    print(f"  [DEBUG E5] Processing {len(composite_scores_per_sample)} samples...")
+
+    for i, sample in enumerate(ds_ragtruth):
+        if i >= len(composite_scores_per_sample):
+            break
+
+        # 1. Extract the hallucination type from the 'labels' column
+        raw_labels_attr = sample.get("labels", "[]")
+        
+        try:
+            # Handle string vs list formats
+            if isinstance(raw_labels_attr, str):
+                label_list = ast.literal_eval(raw_labels_attr)
+            else:
+                label_list = raw_labels_attr
+            
+            # Identify the hallucination type
+            if isinstance(label_list, list) and len(label_list) > 0:
+                # We take the primary label_type found in this sample
+                hal_type = label_list[0].get("label_type", "Unknown")
+            else:
+                hal_type = "No Hallucination"
+        except (ValueError, SyntaxError):
+            hal_type = "Parsing Error"
+
+        # 2. Alignment Safety & Data Aggregation
+        scores = np.array(composite_scores_per_sample[i])
+        labels = np.array(label_arrays_per_sample[i])
+        min_len = min(len(scores), len(labels))
+        
+        if hal_type not in type_scores:
+            type_scores[hal_type] = {"scores": [], "labels": []}
+
+        type_scores[hal_type]["scores"].extend(scores[:min_len].tolist())
+        type_scores[hal_type]["labels"].extend(labels[:min_len].tolist())
+
+    
+    # Before calculating results, add 'No Hallucination' tokens to every other category 
+    # so there is a baseline of 0s to compare against the 1s.
+    # Check if we actually found clean data
+    clean_data = type_scores.get("No Hallucination", {"scores": [], "labels": []})
+    print(f"  [DEBUG E5] Clean tokens found: {len(clean_data['labels'])}")
+    
+    
+    # 3. Final AUROC calculation per type
+    results = {}
+    for t, data in type_scores.items():
+        if t == "No Hallucination": continue
+        
+        # Combine category-specific hallucinations with all clean tokens
+        c_scores = np.array(data["scores"] + clean_data["scores"])
+        c_labels = np.array(data["labels"] + clean_data["labels"])
+        
+        # DEBUG: Check if we have both 0s and 1s
+        unique_labels = np.unique(c_labels)
+        if len(unique_labels) > 1:
+            auroc = roc_auc_score(c_labels, c_scores)
+            results[t] = {"auroc": round(auroc, 4), "token_count": len(c_labels)}
+        else:
+            print(f"  [DEBUG E5] {t} failed: Unique labels in set: {unique_labels}")
+            results[t] = {"auroc": "N/A", "token_count": len(c_labels)}
+        
+    return results
