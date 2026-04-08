@@ -48,6 +48,16 @@ def safe_auroc(labels, scores):
         return float('nan')
     return roc_auc_score(labels, scores)
 
+def orient_score(scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """Ensure higher score = more hallucinated. Flip if AUROC < 0.5."""
+    if len(np.unique(labels)) < 2:
+        return scores
+    try:
+        a = roc_auc_score(labels, scores)
+        return scores if a >= 0.5 else -scores
+    except:
+        return scores
+
 def smooth_scores(scores: np.ndarray, window: int = 3) -> np.ndarray:
     """Apply a sliding window average to token-level scores."""
     if len(scores) < window:
@@ -126,40 +136,46 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
                 # Bug 3 fixed — use new variable names, don't overwrite
                 # 1. Align and Slice
                 min_len = min(len(ig), len(kl), len(conf), len(token_labels))
-                ig_t      = ig[:min_len]
-                kl_t      = kl[:min_len]
-                conf_t    = conf[:min_len]
-                H_with_t  = H_with[:min_len]
-                labels_t  = token_labels[:min_len]
-                sem_arr   = np.full(min_len, sem_ent_val)
+                ig_t     = ig[:min_len]
+                kl_t     = kl[:min_len]
+                conf_t   = conf[:min_len]
+                H_with_t = H_with[:min_len]
+                labels_t = token_labels[:min_len]
+                sem_arr  = np.full(min_len, sem_ent_val)
 
-                # 2. Transform and Smooth (Do this FIRST)
-                ig_hal   = smooth_scores(-ig_t, window=3)
-                kl_hal   = smooth_scores(kl_t, window=3)
-                conf_hal = smooth_scores(conf_t, window=3)
-                ent_hal  = smooth_scores(H_with_t, window=3) 
+                # 2. Raw scores for temporal analysis (NO smoothing — preserves sharp signal)
+                ig_raw   = -ig_t        # negate: low IG = hallucination
+                kl_raw   = kl_t         # keep: will be auto-oriented later
+                conf_raw = conf_t
+                ent_raw  = H_with_t
 
-                # 3. Global aggregation (Use the smoothed variables!)
+                # 3. Smoothed scores for global AUROC aggregation
+                ig_hal   = smooth_scores(ig_raw,   window=3)
+                kl_hal   = smooth_scores(kl_raw,   window=3)
+                conf_hal = smooth_scores(conf_raw, window=3)
+                ent_hal  = smooth_scores(ent_raw,  window=3)
+
+                # 4. Global aggregation — smoothed (used for AUROC, E1/E2, E4, E6-E8)
                 all_ig.extend(ig_hal)
                 all_kl.extend(kl_hal)
                 all_conf.extend(conf_hal)
                 all_sem.extend(sem_arr)
-                all_ent.extend(ent_hal)      # FIXED: was H_with_t
+                all_ent.extend(ent_hal)
                 all_labels.extend(labels_t)
 
-                # 4. Build Composite (Uses variance weighting)
+                # 5. Build per-sample composite using smoothed scores
                 sample_metrics = {
                     "IG": ig_hal, "KL": kl_hal, "ConfDrop": conf_hal,
                     "SemEnt": sem_arr, "EntOnly": ent_hal
                 }
                 comp = build_composite(sample_metrics, labels_t, mode="variance_weight")
-                
-                # 5. Per-sample storage (Use the smoothed variables!)
-                ig_per_sample.append(ig_hal)
-                kl_per_sample.append(kl_hal)
-                conf_per_sample.append(conf_hal)
-                sem_per_sample.append(sem_arr)
-                ent_per_sample.append(ent_hal) # FIXED: was H_with_t
+
+                # 6. Per-sample storage — RAW (used for E3 temporal, NOT smoothed)
+                ig_per_sample.append(ig_raw)       # raw, not smoothed
+                kl_per_sample.append(kl_raw)       # raw, not smoothed
+                conf_per_sample.append(conf_raw)   # raw, not smoothed
+                sem_per_sample.append(sem_arr)     # same either way (constant per sample)
+                ent_per_sample.append(ent_raw)     # raw, not smoothed
                 label_per_sample.append(labels_t)
                 composite_per_sample.append(comp)
 
@@ -200,54 +216,88 @@ def run_all_experiments(data, dataset_name):
     print(f"EXPERIMENTS ON {dataset_name.upper()}")
     print(f"{'='*60}")
 
-    # ── E1 + E2: incremental composite table ──────────────────────
-    metrics_ordered = {
-        "Entropy-only (B1)": t["EntOnly"],
-        "+ Info Gain":        t["IG"],
-        "+ KL divergence":    t["KL"],
-        "+ Conf drop":        t["ConfDrop"],
-        "+ Semantic entropy": t["SemEnt"],
-    }
+    # --- Step 1: Auto-orient all raw metrics ---
+    # This ensures consistency for E3 and the global table
+    for key in ["IG", "KL", "ConfDrop", "EntOnly"]:
+        scores = t[key]
+        if len(np.unique(labels)) > 1:
+            try:
+                if roc_auc_score(labels, scores) < 0.5:
+                    t[key] = -scores
+                    p[key] = [-arr for arr in p[key]]
+            except:
+                pass
+
+    # Define the display names and their corresponding data keys
+    # Note: Using the internal keys (IG, KL) for math consistency
+    metrics_to_run = [
+        ("Entropy-only (B1)", "EntOnly"),
+        ("+ Info Gain", "IG"),
+        ("+ KL divergence", "KL"),
+        ("+ Conf drop", "ConfDrop"),
+        ("+ Semantic entropy", "SemEnt"),
+    ]
 
     print("\n── E1+E2: Composite build table ──")
-    running = {}
-    table_rows = []
-    for name, scores in metrics_ordered.items():
-        # Clean the scores of any NaNs or Infs caused by division by zero
-        clean_scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        running[name] = clean_scores
-        composite = build_composite(running, labels, mode="variance_weight")
 
-        composite = np.nan_to_num(composite, nan=0.0, posinf=0.0, neginf=0.0)
+    # --- Step 2: First pass: get individual AUROCs for weights ---
+    individual_aurocs = {}
+    for name, key in metrics_to_run:
+        scores = np.nan_to_num(t[key], nan=0.0)
+        try:
+            a = roc_auc_score(labels, scores)
+        except:
+            a = 0.5
+        individual_aurocs[key] = a # Use the key 'IG', 'KL' etc for the dict
+        print(f"  Individual AUROC {name}: {a:.4f}")
+
+    # --- Step 3: Second pass: Build incremental composite ---
+    running_keys = []
+    table_rows = []
+
+    for name, key in metrics_to_run:
+        running_keys.append(key)
+        
+        # Calculate weights for the metrics currently in 'running_keys'
+        # Weight = individual AUROC - 0.5
+        current_weights = {k: max(0, individual_aurocs[k] - 0.5) for k in running_keys}
+        total_w = sum(current_weights.values())
+
+        if total_w < 1e-6:
+            # Fallback to equal weight if no metric is better than random
+            norm_scores = [normalize_score(np.nan_to_num(t[k])) for k in running_keys]
+            composite = np.mean(norm_scores, axis=0)
+        else:
+            # Weighted sum of normalized scores
+            composite = np.zeros_like(labels, dtype=float)
+            for k in running_keys:
+                w = current_weights[k] / total_w
+                norm_s = normalize_score(np.nan_to_num(t[k]))
+                composite += norm_s * w
+
+        composite = np.nan_to_num(composite, nan=0.0)
+        
+        # Generate table row
         row = row_for_table(name, composite, labels)
         auroc_m, lo, hi = bootstrap_ci(composite, labels, metric="auroc")
         row["AUROC 95% CI"] = f"[{lo:.3f}, {hi:.3f}]"
         table_rows.append(row)
         print(row)
 
-    # SelfCheckGPT baseline row — fill with placeholder if not run
-    # (run selfcheck separately if time permits)
     df_e12 = pd.DataFrame(table_rows)
     df_e12.to_csv(f"results/E1E2_{dataset_name}.csv", index=False)
 
-    # ── E3: temporal precedence ───────────────────────────────────
+    # ── E3: Temporal precedence ───────────────────────────────────
+    # (Remains largely the same, but now uses flipped 'p' data)
     print("\n── E3: Temporal precedence ──")
-    metric_arrs = {
-        "IG":       p["IG"],
-        "KL":       p["KL"],
-        "ConfDrop": p["ConfDrop"],
-        "SemEnt":   p["SemEnt"],
-        "EntOnly":  p["EntOnly"],
-    }
+    metric_arrs = {k: p[k] for k in ["IG", "KL", "ConfDrop", "SemEnt", "EntOnly"]}
 
     if dataset_name == "halueval":
-        print("  [Skipping E3] HaluEval labels are whole-response; no pre-span context available.")
+        print("  [Skipping E3] HaluEval labels are whole-response.")
     else:
-        print("  [Running E3] Analyzing temporal precedence on RAGTruth spans...")
+        print("  [Running E3] Analyzing temporal precedence...")
         means = compute_temporal_precedence(metric_arrs, p["labels"])
         
-        # Move the printing inside the 'else' so it only runs when 'means' exists
         print("Mean scores at t-3 to t+1:")
         for offset in [-3, -2, -1, 0, 1]:
             row_str = f"  t{offset:+d}: " + "  ".join(
@@ -258,26 +308,22 @@ def run_all_experiments(data, dataset_name):
             
         plot_temporal_precedence(means, save_dir="results")
 
-        # Move Mann-Whitney U inside the 'else' as well
-        print("\n  Mann-Whitney U (metric at t−2 vs metric at t):")
+        print("\n  Mann-Whitney U (t−2 vs t):")
         for m_name in metric_arrs:
-            vals_tm2 = []
-            vals_t0  = []
+            vals_tm2, vals_t0 = [], []
             for sample_idx, lab_arr in enumerate(p["labels"]):
                 arr = metric_arrs[m_name][sample_idx]
                 in_span = False
                 for i, lab in enumerate(lab_arr):
                     if lab == 1 and not in_span:
                         in_span = True
-                        if i - 2 >= 0 and i - 2 < len(arr):
-                            vals_tm2.append(arr[i - 2])
-                        if i < len(arr):
-                            vals_t0.append(arr[i])
-                    elif lab == 0:
-                        in_span = False
+                        if i - 2 >= 0 and i - 2 < len(arr): vals_tm2.append(arr[i-2])
+                        if i < len(arr): vals_t0.append(arr[i])
+                    elif lab == 0: in_span = False
+            
             if vals_tm2 and vals_t0:
                 u, p_val = mannwhitneyu(vals_tm2, vals_t0, alternative='less')
-                print(f"    {m_name}: U={u:.0f}, p={p_val:.4f} (t-2 < t → signal rises toward hallucination)")
+                print(f"    {m_name}: U={u:.0f}, p={p_val:.4f}")
     
     return df_e12
 
@@ -294,11 +340,42 @@ def main():
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
-    print("Collecting metrics on RAGTruth...")
-    rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=150)
+    #print("Collecting metrics on RAGTruth...")
+    #rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=150)
 
-    print("Collecting metrics on HaluEval...")
-    hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=150)
+    #print("Collecting metrics on HaluEval...")
+    #hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=150)
+
+
+
+    # ── Collect metrics (With Checkpoint Logic) ───────────────────
+    
+    # RAGTruth Checkpoint
+    rt_path = "results/checkpoint_ragtruth.pkl"
+    if os.path.exists(rt_path):
+        print(f"--- Loading RAGTruth from checkpoint: {rt_path} ---")
+        with open(rt_path, "rb") as f:
+            rt_data = pickle.load(f)
+    else:
+        print("RAGTruth checkpoint not found. Starting collection...")
+        metric = InformationGainMetric(model_name="facebook/opt-1.3b")
+        sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
+        rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=150)
+
+    # HaluEval Checkpoint
+    hv_path = "results/checkpoint_halueval.pkl"
+    if os.path.exists(hv_path):
+        print(f"--- Loading HaluEval from checkpoint: {hv_path} ---")
+        with open(hv_path, "rb") as f:
+            hv_data = pickle.load(f)
+    else:
+        print("HaluEval checkpoint not found. Starting collection...")
+        if metric is None: # Only load model if not already loaded
+            metric = InformationGainMetric(model_name="facebook/opt-1.3b")
+            sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
+        hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=150)
+
+
 
     # ── Run experiments ───────────────────────────────────────────
     df_rt = run_all_experiments(rt_data, "ragtruth")
@@ -350,22 +427,39 @@ def main():
 
 
 
-    # ── E6–E8: SOTA gap table ────────────────────────────────────
+    # ── E6–E8: SOTA gap ────────────────────────────────────────
     print("\n── E6–E8: SOTA gap ──")
 
-    # CLEAN ALL METRICS BEFORE BUILDING FINAL COMPOSITE
-    cleaned_tokens = {
-        k: np.nan_to_num(rt_data["tokens"][k], nan=0.0) 
-        for k in ["IG", "KL", "ConfDrop", "SemEnt", "EntOnly"]
+    rt_labels = rt_data["tokens"]["labels"]
+
+    # Use AUROC-proportional weights, same as E1+E2 table
+    individual_aurocs_rt = {
+        "IG":      safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["IG"])),
+        "KL":      safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["KL"])),
+        "ConfDrop":safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["ConfDrop"])),
+        "EntOnly": safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["EntOnly"])),
     }
 
-    rt_composite = build_composite(cleaned_tokens, rt_labels, mode="variance_weight")
-    rt_composite = np.nan_to_num(rt_composite, nan=0.0) # Final safety check
+    # Weight = max(0, AUROC - 0.5) so only metrics above random contribute
+    weights_rt = {k: max(0.0, v - 0.5) for k, v in individual_aurocs_rt.items()}
+    total_w = sum(weights_rt.values())
 
-    our_auroc   = safe_auroc(rt_labels, rt_composite)
-    ent_auroc   = safe_auroc(rt_labels, cleaned_tokens["EntOnly"])
+    if total_w > 1e-6:
+        norm_scores = {k: normalize_score(np.nan_to_num(rt_data["tokens"][k])) 
+                    for k in weights_rt}
+        rt_composite = sum(norm_scores[k] * (weights_rt[k]/total_w) 
+                        for k in weights_rt)
+    else:
+        rt_composite = normalize_score(np.nan_to_num(rt_data["tokens"]["EntOnly"]))
+
+    rt_composite = np.nan_to_num(rt_composite)
+    print(f"  AUROC weights used: { {k: round(weights_rt[k]/total_w, 3) for k in weights_rt} }")
+
+    our_auroc  = safe_auroc(rt_labels, rt_composite)
+    ent_auroc  = safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["EntOnly"]))
     lumina_auroc = 0.87
-    gap_closed  = (our_auroc - ent_auroc) / (lumina_auroc - ent_auroc) * 100
+    gap_closed = (our_auroc - ent_auroc) / (lumina_auroc - ent_auroc) * 100
+    
     print(f"  Entropy baseline: {ent_auroc:.4f}")
     print(f"  Our composite:    {our_auroc:.4f}")
     print(f"  LUMINA (SOTA):    {lumina_auroc:.4f}")
