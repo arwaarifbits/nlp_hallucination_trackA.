@@ -95,7 +95,7 @@ def row_for_table(name, scores, labels):
 # ─── main collection loop ────────────────────────────────────────────────────
 
 def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
-                        dataset_name, max_samples=150):
+                        dataset_name, max_samples=10):
     all_ig, all_kl, all_conf, all_sem, all_ent, all_labels = [], [], [], [], [], []
     ig_per_sample, kl_per_sample, conf_per_sample = [], [], []
     sem_per_sample, ent_per_sample = [], []
@@ -334,17 +334,17 @@ def main():
     sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=150)
+    ragtruth = load_ragtruth(max_samples=10)
     ragtruth = ragtruth.shuffle(seed=42)
-    halueval = load_halueval(max_samples=150)
+    halueval = load_halueval(max_samples=10)
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
     #print("Collecting metrics on RAGTruth...")
-    #rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=150)
+    #rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=300)
 
     #print("Collecting metrics on HaluEval...")
-    #hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=150)
+    #hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=300)
 
 
 
@@ -360,7 +360,7 @@ def main():
         print("RAGTruth checkpoint not found. Starting collection...")
         metric = InformationGainMetric(model_name="facebook/opt-1.3b")
         sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
-        rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=150)
+        rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=10)
 
     # HaluEval Checkpoint
     hv_path = "results/checkpoint_halueval.pkl"
@@ -373,7 +373,7 @@ def main():
         if metric is None: # Only load model if not already loaded
             metric = InformationGainMetric(model_name="facebook/opt-1.3b")
             sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
-        hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=150)
+        hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=10)
 
 
 

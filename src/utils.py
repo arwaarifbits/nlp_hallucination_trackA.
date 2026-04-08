@@ -8,31 +8,23 @@ def load_ragtruth(max_samples=None):
     # 1. Load the full dataset
     df_all = pd.read_csv("data/ragtruth/ragtruth.csv")
 
-    # 2. Define "Hallucination" based on the 'labels' column content
-    # If it's just '[]', the string length is 2. If it has data, it's > 2.
+    # 2. Basic stats for your own info
     is_hallucination = df_all['labels'].apply(lambda x: len(str(x)) > 2)
-
-    hal_pool = df_all[is_hallucination]
-    clean_pool = df_all[~is_hallucination]
-
-    print(f"  [Data Setup] Found {len(hal_pool)} hallucinated and {len(clean_pool)} clean samples.")
+    print(f"  [Data Setup] Total dataset: {len(df_all)} samples.")
+    print(f"  [Data Setup] Natural distribution: {is_hallucination.sum()} hallucinated, {len(df_all) - is_hallucination.sum()} clean.")
 
     if max_samples:
-        # Take half hallucinated, half clean, up to max_samples total
-        num_per_side = min(max_samples // 2, len(hal_pool), len(clean_pool))
+        # We take the FIRST max_samples to keep it reproducible (held-out test set logic)
+        final_df = df_all.head(max_samples).copy()
     else:
-        num_per_side = min(len(hal_pool), len(clean_pool))
-    
-    balanced_df = pd.concat([
-        hal_pool.sample(num_per_side, random_state=42),
-        clean_pool.sample(num_per_side, random_state=42)
-    ]).sample(frac=1, random_state=42).reset_index(drop=True)
-    
-    # 4. Convert to HuggingFace Dataset for the rest of your pipeline
-    #ragtruth = Dataset.from_pandas(ragtruth_balanced_df)
+        final_df = df_all.copy()
 
-    print(f"  [Data Setup] Balanced dataset: {len(balanced_df)} samples ({num_per_side} each class).")
-    return Dataset.from_pandas(balanced_df)
+    # 4. Final stats
+    final_hal_count = final_df['labels'].apply(lambda x: len(str(x)) > 2).sum()
+    print(f"  [Data Setup] Final dataset: {len(final_df)} samples.")
+    print(f"  [Data Setup] Test Set Mix: {final_hal_count} Hallucinated / {len(final_df) - final_hal_count} Clean.")
+    
+    return Dataset.from_pandas(final_df.reset_index(drop=True))
 
 
 def load_halueval(max_samples=None):
