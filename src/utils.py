@@ -17,19 +17,22 @@ def load_ragtruth(max_samples=None):
 
     print(f"  [Data Setup] Found {len(hal_pool)} hallucinated and {len(clean_pool)} clean samples.")
 
-    # 3. Create a balanced subset (e.g., 25 of each for a total of 50)
-    num_per_side = min(5, len(hal_pool), len(clean_pool))
-    ragtruth_balanced_df = pd.concat([
+    if max_samples:
+        # Take half hallucinated, half clean, up to max_samples total
+        num_per_side = min(max_samples // 2, len(hal_pool), len(clean_pool))
+    else:
+        num_per_side = min(len(hal_pool), len(clean_pool))
+    
+    balanced_df = pd.concat([
         hal_pool.sample(num_per_side, random_state=42),
         clean_pool.sample(num_per_side, random_state=42)
-    ]).sample(frac=1).reset_index(drop=True) # Shuffle the final set
-
+    ]).sample(frac=1, random_state=42).reset_index(drop=True)
+    
     # 4. Convert to HuggingFace Dataset for the rest of your pipeline
-    ragtruth = Dataset.from_pandas(ragtruth_balanced_df)
+    #ragtruth = Dataset.from_pandas(ragtruth_balanced_df)
 
-    print(f"  [Data Setup] Balanced RAGTruth dataset created with {len(ragtruth)} samples.")
-
-    return ragtruth
+    print(f"  [Data Setup] Balanced dataset: {len(balanced_df)} samples ({num_per_side} each class).")
+    return Dataset.from_pandas(balanced_df)
 
 
 def load_halueval(max_samples=None):
