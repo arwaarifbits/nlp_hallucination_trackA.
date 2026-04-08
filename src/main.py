@@ -135,7 +135,7 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
 
                 # 2. Transform and Smooth (Do this FIRST)
                 ig_hal   = smooth_scores(-ig_t, window=3)
-                kl_hal   = smooth_scores(-kl_t, window=3)
+                kl_hal   = smooth_scores(kl_t, window=3)
                 conf_hal = smooth_scores(conf_t, window=3)
                 ent_hal  = smooth_scores(H_with_t, window=3) 
 
@@ -240,37 +240,45 @@ def run_all_experiments(data, dataset_name):
         "SemEnt":   p["SemEnt"],
         "EntOnly":  p["EntOnly"],
     }
-    means = compute_temporal_precedence(metric_arrs, p["labels"])
-    print("Mean scores at t-3 to t+1:")
-    for offset in [-3, -2, -1, 0, 1]:
-        row_str = f"  t{offset:+d}: " + "  ".join(
-            f"{m}={means[m].get(offset, float('nan')):.4f}"
-            for m in metric_arrs.keys()
-        )
-        print(row_str)
-    plot_temporal_precedence(means, save_dir="results")
 
-    # Mann-Whitney U for temporal (compare t-2 vs t values across all metrics)
-    print("\n  Mann-Whitney U (metric at t−2 vs metric at t):")
-    for m_name in metric_arrs:
-        vals_tm2 = []
-        vals_t0  = []
-        for sample_idx, lab_arr in enumerate(p["labels"]):
-            arr = metric_arrs[m_name][sample_idx]
-            in_span = False
-            for i, lab in enumerate(lab_arr):
-                if lab == 1 and not in_span:
-                    in_span = True
-                    if i - 2 >= 0 and i - 2 < len(arr):
-                        vals_tm2.append(arr[i - 2])
-                    if i < len(arr):
-                        vals_t0.append(arr[i])
-                elif lab == 0:
-                    in_span = False
-        if vals_tm2 and vals_t0:
-            u, p_val = mannwhitneyu(vals_tm2, vals_t0, alternative='less')
-            print(f"    {m_name}: U={u:.0f}, p={p_val:.4f} (t-2 < t → signal rises toward hallucination)")
+    if dataset_name == "halueval":
+        print("  [Skipping E3] HaluEval labels are whole-response; no pre-span context available.")
+    else:
+        print("  [Running E3] Analyzing temporal precedence on RAGTruth spans...")
+        means = compute_temporal_precedence(metric_arrs, p["labels"])
+        
+        # Move the printing inside the 'else' so it only runs when 'means' exists
+        print("Mean scores at t-3 to t+1:")
+        for offset in [-3, -2, -1, 0, 1]:
+            row_str = f"  t{offset:+d}: " + "  ".join(
+                f"{m}={means[m].get(offset, float('nan')):.4f}"
+                for m in metric_arrs.keys()
+            )
+            print(row_str)
+            
+        plot_temporal_precedence(means, save_dir="results")
 
+        # Move Mann-Whitney U inside the 'else' as well
+        print("\n  Mann-Whitney U (metric at t−2 vs metric at t):")
+        for m_name in metric_arrs:
+            vals_tm2 = []
+            vals_t0  = []
+            for sample_idx, lab_arr in enumerate(p["labels"]):
+                arr = metric_arrs[m_name][sample_idx]
+                in_span = False
+                for i, lab in enumerate(lab_arr):
+                    if lab == 1 and not in_span:
+                        in_span = True
+                        if i - 2 >= 0 and i - 2 < len(arr):
+                            vals_tm2.append(arr[i - 2])
+                        if i < len(arr):
+                            vals_t0.append(arr[i])
+                    elif lab == 0:
+                        in_span = False
+            if vals_tm2 and vals_t0:
+                u, p_val = mannwhitneyu(vals_tm2, vals_t0, alternative='less')
+                print(f"    {m_name}: U={u:.0f}, p={p_val:.4f} (t-2 < t → signal rises toward hallucination)")
+    
     return df_e12
 
 
