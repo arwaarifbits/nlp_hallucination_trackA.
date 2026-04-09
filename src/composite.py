@@ -32,7 +32,7 @@ def build_composite(all_metrics: dict, labels: np.ndarray, mode: str = "variance
             continue # Drop metrics that provide no signal (all same value)
             
         # Normalize to [0, 1]
-        normed = (col - lo) / (hi - lo + 1e-12)
+        normed = (col - lo) / (hi - lo + 1e-8) if (hi - lo) > 1e-8 else np.zeros_like(col)
         cleaned_cols.append(normed)
         valid_names.append(n)
 
