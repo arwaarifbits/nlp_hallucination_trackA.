@@ -21,8 +21,8 @@ class InformationGainMetric:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
-            output_hidden_states=True).to(self.device)
+            torch_dtype=torch.float16 if self.device != "cpu" else torch.float32
+            ).to(self.device)
         self.model.eval()
         self.model_name = model_name
 
@@ -159,47 +159,4 @@ class InformationGainMetric:
         return np.array(conf_drop)   # [T], positive = hallucination signal
     
 
-    def compute_mahalanobis_ffn(self, query: str, context: str, response: str, num_samples=5):
-        """
-        Calculates internal instability in FFN layers.
-        Required for Track A: Page 8 (Mechanistic Reasoning).
-        """
-        # 1. Prepare prompt and tokens
-        prompt = f"Context: {context}\nQuestion: {query}\nAnswer:"
-        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt").to(self.device)
-        res_ids = self.tokenizer.encode(response, add_special_tokens=False, return_tensors="pt").to(self.device)
-        full_ids = torch.cat([prompt_ids, res_ids], dim=1)
-        prompt_len = prompt_ids.shape[1]
-
-        # 2. Enable Stochasticity (The "Demo Question" answer)
-        self.model.train() # Force Dropout ON to get a distribution
-        all_samples = []
-
-        with torch.no_grad():
-            for _ in range(num_samples):
-                outputs = self.model(full_ids)
-                # Extract Mid-to-Late layers (16-24 for OPT-1.3b)
-                # hidden_states[layer_idx] shape: [1, seq_len, hidden_dim]
-                layers_stack = torch.stack(outputs.hidden_states[16:]) 
-                
-                # Filter for response tokens only
-                resp_tokens_states = layers_stack[:, 0, prompt_len - 1 : full_ids.shape[1] - 1, :]
-                all_samples.append(resp_tokens_states)
-
-        # 3. Math for the evaluator (mu_t and Sigma_t)
-        # Shape: [Samples, Layers, Tokens, Dim]
-        stacked = torch.stack(all_samples) 
-        
-        # mu_t: The mean internal representation
-        mu_t = stacked.mean(dim=0) 
-        
-        # Sigma_t proxy: The internal variance (instability)
-        diff = stacked - mu_t.unsqueeze(0)
-        var_t = torch.mean(diff**2, dim=0) 
-        
-        # 4. Final Score: Average across layers and hidden dimensions
-        # High Score = Hallucination
-        mahalanobis_score = var_t.mean(dim=-1).mean(dim=0) 
-        
-        self.model.eval() # Reset to normal mode
-        return mahalanobis_score.cpu().numpy()
+    

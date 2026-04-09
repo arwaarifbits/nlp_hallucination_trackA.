@@ -53,7 +53,11 @@ def build_composite(all_metrics: dict, labels: np.ndarray, mode: str = "variance
         if total_var < 1e-10:
             result = np.mean(X_norm, axis=1)
         else:
-            weights = variances / total_var
+            if total_var < 1e-10:
+                result = np.mean(X_norm, axis=1)
+                weights = np.ones_like(variances) / len(variances)
+            else:
+                weights = variances / (total_var + 1e-12)
             weight_dict = {n: round(float(w), 3) for n, w in zip(valid_names, weights)}
             print(f"  [Composite] Active metrics & weights: {weight_dict}")
             
@@ -61,14 +65,7 @@ def build_composite(all_metrics: dict, labels: np.ndarray, mode: str = "variance
             result = np.dot(X_norm, weights)
             
     elif mode == "logistic":
-        from sklearn.linear_model import LogisticRegression
-        # Note: 'labels' must be provided and contain both classes for this to work
-        if len(np.unique(labels)) > 1:
-            clf = LogisticRegression(max_iter=1000)
-            clf.fit(X_norm, labels)
-            result = clf.predict_proba(X_norm)[:, 1]
-        else:
-            result = np.mean(X_norm, axis=1)
+        raise ValueError("Logistic mode is supervised and not allowed for Track A")
 
     # FINAL SAFETY: Ensure no NaNs or Infs leak into the final AUROC calculation
     return np.nan_to_num(result, nan=0.0, posinf=1.0, neginf=0.0)

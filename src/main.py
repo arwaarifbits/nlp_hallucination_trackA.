@@ -15,6 +15,7 @@ from composite import build_composite, incremental_auroc_table, normalize_score
 from temporal import compute_temporal_precedence, plot_temporal_precedence
 from evaluate import evaluate_metric, bootstrap_ci, auroc_by_haltype
 from scipy.ndimage import uniform_filter1d
+from baselines import SelfCheckBaseline
 
 os.makedirs("results", exist_ok=True)
 
@@ -94,11 +95,11 @@ def row_for_table(name, scores, labels):
 
 # ─── main collection loop ────────────────────────────────────────────────────
 
-def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
-                        dataset_name, max_samples=300):
-    all_ig, all_kl, all_conf, all_sem, all_ent, all_mah, all_labels = [], [], [], [], [], [], []
-    ig_per_sample, kl_per_sample, conf_per_sample = [], [], []
-    sem_per_sample, ent_per_sample, mah_per_sample = [], [], []
+def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
+                        dataset_name, max_samples=4):
+    all_ig, all_kl, all_conf, all_sem, all_ent, all_sc, all_labels = [], [], [], [], [], [], []
+    ig_per_sample, kl_per_sample, conf_per_sample, sc_per_sample = [], [], [], []
+    sem_per_sample, ent_per_sample = [], []
     label_per_sample, composite_per_sample = [], []
 
     for i, sample in enumerate(tqdm(dataset.select(range(min(max_samples, len(dataset)))),
@@ -122,9 +123,46 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
                 ig, H_no, H_with = metric_obj.compute_information_gain(query, context, response)
                 kl   = metric_obj.compute_kl_divergence(query, context, response)
                 conf = metric_obj.compute_confidence_drop(query, context, response)
-                mah = metric_obj.compute_mahalanobis_ffn(query, context, response)
-
+                
                 sem_ent_val = sem_entropy_obj.compute_semantic_entropy(query, context, num_samples=5)
+
+                # --- SelfCheckGPT ---
+                prompt = f"Context: {context}\nQuestion: {query}\nAnswer:"
+
+                samples = selfcheck_obj.generate_samples(
+                    metric_obj.model,
+                    metric_obj.tokenizer,
+                    prompt,
+                    num_samples=5,
+                    device=metric_obj.device
+                )
+
+                # Split response into sentences (simple split)
+                sentences = [s.strip() for s in response.split('.') if s.strip()]
+
+                if len(sentences) == 0:
+                    continue
+
+                # Split response into sentences
+                sentences = [s.strip() for s in response.split('.') if s.strip()]
+
+                if len(sentences) == 0:
+                    continue
+
+                sc_scores = selfcheck_obj.score(sentences, samples)
+
+                # FIXED: expand sentence-level scores to token-level
+                tokens   = metric_obj.tokenizer.tokenize(response)
+                sc_token = np.zeros(len(tokens))
+
+                idx = 0
+                for sent_idx, (sent, score) in enumerate(zip(sentences, sc_scores)):
+                    sent_tokens = metric_obj.tokenizer.tokenize(sent)
+                    for _ in sent_tokens:
+                        if idx >= len(sc_token):   # stop when tokens exhausted
+                            break
+                        sc_token[idx] = float(score)
+                        idx += 1
 
                 token_labels = align_labels_to_tokens(response, word_labels, metric_obj.tokenizer)
                 
@@ -135,12 +173,12 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
 
                 # Bug 3 fixed — use new variable names, don't overwrite
                 # 1. Align and Slice
-                min_len = min(len(ig), len(kl), len(conf), len(mah), len(token_labels))
+                min_len = min(len(ig), len(kl), len(conf), len(sc_token), len(token_labels))
                 ig_t     = ig[:min_len]
                 kl_t     = kl[:min_len]
                 conf_t   = conf[:min_len]
                 H_with_t = H_with[:min_len]
-                mah_t = mah[:min_len]
+                sc_t = sc_token[:min_len]
                 labels_t = token_labels[:min_len]
                 sem_arr  = np.full(min_len, sem_ent_val)
 
@@ -148,21 +186,20 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
                 ig_raw   = -ig_t        # negate: low IG = hallucination
                 kl_raw   = kl_t         # keep: will be auto-oriented later
                 conf_raw = conf_t
-                mah_raw = mah_t
                 ent_raw  = H_with_t
 
                 # 3. Smoothed scores for global AUROC aggregation
-                ig_hal   = smooth_scores(ig_raw,   window=3)
+                ig_hal   = smooth_scores(ig_t,   window=3)
                 kl_hal   = smooth_scores(kl_raw,   window=3)
                 conf_hal = smooth_scores(conf_raw, window=3)
-                mah_hal = smooth_scores(mah_raw, window=3)
+                sc_hal = smooth_scores(sc_t, window=3)
                 ent_hal  = smooth_scores(ent_raw,  window=3)
 
                 # 4. Global aggregation — smoothed (used for AUROC, E1/E2, E4, E6-E8)
                 all_ig.extend(ig_hal)
                 all_kl.extend(kl_hal)
                 all_conf.extend(conf_hal)
-                all_mah.extend(mah_hal)
+                all_sc.extend(sc_hal)
                 all_sem.extend(sem_arr)
                 all_ent.extend(ent_hal)
                 all_labels.extend(labels_t)
@@ -170,7 +207,7 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
                 # 5. Build per-sample composite using smoothed scores
                 sample_metrics = {
                     "IG": ig_hal, "KL": kl_hal, "ConfDrop": conf_hal,
-                    "SemEnt": sem_arr, "EntOnly": ent_hal, "Mahalanobis": mah_hal
+                    "SemEnt": sem_arr, "EntOnly": ent_hal, "SelfCheck": sc_hal
                 }
                 comp = build_composite(sample_metrics, labels_t, mode="variance_weight")
 
@@ -178,10 +215,10 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
                 ig_per_sample.append(ig_raw)       # raw, not smoothed
                 kl_per_sample.append(kl_raw)       # raw, not smoothed
                 conf_per_sample.append(conf_raw)   # raw, not smoothed
-                mah_per_sample.append(mah_raw)
                 sem_per_sample.append(sem_arr)     # same either way (constant per sample)
                 ent_per_sample.append(ent_raw)     # raw, not smoothed
                 label_per_sample.append(labels_t)
+                sc_per_sample.append(sc_t)
                 composite_per_sample.append(comp)
 
             except Exception as e:
@@ -193,12 +230,12 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, dataset,
         "tokens": {
             "IG": np.array(all_ig), "KL": np.array(all_kl),
             "ConfDrop": np.array(all_conf), "SemEnt": np.array(all_sem),
-            "EntOnly": np.array(all_ent), "Mahalanobis": np.array(all_mah), "labels": np.array(all_labels)
+            "EntOnly": np.array(all_ent), "SelfCheck": np.array(all_sc), "labels": np.array(all_labels)
         },
         "per_sample": {
             "IG": ig_per_sample, "KL": kl_per_sample,
             "ConfDrop": conf_per_sample, "SemEnt": sem_per_sample,
-            "EntOnly": ent_per_sample, "Mahalanobis": mah_per_sample, "labels": label_per_sample,
+            "EntOnly": ent_per_sample, "SelfCheck": sc_per_sample, "labels": label_per_sample,
             "composite": composite_per_sample
         }
     }
@@ -223,25 +260,26 @@ def run_all_experiments(data, dataset_name):
 
     # --- Step 1: Auto-orient all raw metrics ---
     # This ensures consistency for E3 and the global table
-    for key in ["IG", "KL", "ConfDrop", "Mahalanobis", "EntOnly"]:
-        scores = t[key]
+    for key in ["IG", "KL", "ConfDrop", "EntOnly", "SelfCheck"]:
+        if key not in t:
+            continue
+        scores = np.nan_to_num(t[key])
         if len(np.unique(labels)) > 1:
-            try:
-                if roc_auc_score(labels, scores) < 0.5:
-                    t[key] = -scores
-                    p[key] = [-arr for arr in p[key]]
-            except:
-                pass
+            if roc_auc_score(labels, scores) < 0.5:
+                t[key] = -scores
+                p[key] = [-arr for arr in p[key]]
+                print(f"  [Orient] Flipped {key} (was inverted)")
 
     # Define the display names and their corresponding data keys
     # Note: Using the internal keys (IG, KL) for math consistency
     metrics_to_run = [
         ("Entropy-only (B1)", "EntOnly"),
+        ("SelfCheckGPT (B2)", "SelfCheck"),
         ("+ Info Gain", "IG"),
         ("+ KL divergence", "KL"),
         ("+ Conf drop", "ConfDrop"),
-        ("+ Mahalanobis (FFN)", "Mahalanobis"),
         ("+ Semantic entropy", "SemEnt"),
+       
     ]
 
     print("\n── E1+E2: Composite build table ──")
@@ -335,14 +373,17 @@ def run_all_experiments(data, dataset_name):
 
 
 def main():
+    
     # ── Load model ────────────────────────────────────────────────
     metric = InformationGainMetric(model_name="facebook/opt-1.3b")
     sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
 
+    selfcheck = SelfCheckBaseline()
+
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=300)
+    ragtruth = load_ragtruth(max_samples=4)
     ragtruth = ragtruth.shuffle(seed=42)
-    halueval = load_halueval(max_samples=300)
+    halueval = load_halueval(max_samples=4)
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
@@ -366,7 +407,7 @@ def main():
         print("RAGTruth checkpoint not found. Starting collection...")
         metric = InformationGainMetric(model_name="facebook/opt-1.3b")
         sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
-        rt_data = collect_all_metrics(metric, sem_metric, ragtruth, "ragtruth", max_samples=300)
+        rt_data = collect_all_metrics(metric, sem_metric, selfcheck, ragtruth, "ragtruth", max_samples=4)
 
     # HaluEval Checkpoint
     hv_path = "results/checkpoint_halueval.pkl"
@@ -379,7 +420,7 @@ def main():
         if metric is None: # Only load model if not already loaded
             metric = InformationGainMetric(model_name="facebook/opt-1.3b")
             sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
-        hv_data = collect_all_metrics(metric, sem_metric, halueval, "halueval", max_samples=300)
+        hv_data = collect_all_metrics(metric, sem_metric, selfcheck, halueval, "halueval", max_samples=4)
 
 
 
@@ -391,7 +432,7 @@ def main():
     print("\n── E4: Cross-domain transfer ──")
     rt_labels = rt_data["tokens"]["labels"]
     hv_labels = hv_data["tokens"]["labels"]
-    for m_name in ["IG", "KL", "ConfDrop", "SemEnt"]:
+    for m_name in ["IG", "KL", "ConfDrop", "SemEnt", "SelfCheck"]:
         # CLEAN THE RAW TOKENS HERE TOO
         rt_scores = np.nan_to_num(rt_data["tokens"][m_name], nan=0.0)
         hv_scores = np.nan_to_num(hv_data["tokens"][m_name], nan=0.0)
@@ -434,7 +475,7 @@ def main():
 
 
     # ── E6–E8: SOTA gap ────────────────────────────────────────
-    print("\n── E6–E8: SOTA gap ──")
+    print("\n── E6-E8: SOTA gap ──")
 
     rt_labels = rt_data["tokens"]["labels"]
 
@@ -444,7 +485,7 @@ def main():
         "KL":      safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["KL"])),
         "ConfDrop":safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["ConfDrop"])),
         "EntOnly": safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["EntOnly"])),
-        "Mahalanobis": safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["Mahalanobis"])),
+        "SelfCheck":    safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["SelfCheck"])),
     }
 
     # Weight = max(0, AUROC - 0.5) so only metrics above random contribute
