@@ -95,17 +95,19 @@ def row_for_table(name, scores, labels):
 
 # ─── main collection loop ────────────────────────────────────────────────────
 
-def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
-                        dataset_name, max_samples=4):
+def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset, 
+                        dataset_name, max_samples=300):
     all_ig, all_kl, all_conf, all_sem, all_ent, all_sc, all_labels = [], [], [], [], [], [], []
     ig_per_sample, kl_per_sample, conf_per_sample, sc_per_sample = [], [], [], []
     sem_per_sample, ent_per_sample = [], []
     label_per_sample, composite_per_sample = [], []
 
-    for i, sample in enumerate(tqdm(dataset.select(range(min(max_samples, len(dataset)))),
+    for i, sample in enumerate(tqdm(dataset.select(range(min(max_samples, len(dataset)))), 
                                     desc=f"{dataset_name}")):
-        variations = []
+        
+        current_sample_idx = i
 
+        variations = []
         if dataset_name == "ragtruth":
             query   = sample["query"]                    
             context = sample["context"]       
@@ -113,140 +115,120 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
         else:
             query   = sample["question"]
             context = sample["knowledge"]
-            variations.append((sample["hallucinated_answer"],
-                                np.ones(len(sample["hallucinated_answer"].split()), dtype=int)))
-            variations.append((sample["right_answer"],
-                                np.zeros(len(sample["right_answer"].split()), dtype=int)))
+            variations.append((sample["hallucinated_answer"], 1)) # Simplified for entire response
+            variations.append((sample["right_answer"], 0))
 
         for response, word_labels in variations:
             try:
+                # 1. Base Metrics
                 ig, H_no, H_with = metric_obj.compute_information_gain(query, context, response)
                 kl   = metric_obj.compute_kl_divergence(query, context, response)
                 conf = metric_obj.compute_confidence_drop(query, context, response)
-                
                 sem_ent_val = sem_entropy_obj.compute_semantic_entropy(query, context, num_samples=5)
-
-                # --- SelfCheckGPT ---
-                prompt = f"Context: {context}\nQuestion: {query}\nAnswer:"
-
-                samples = selfcheck_obj.generate_samples(
-                    metric_obj.model,
-                    metric_obj.tokenizer,
-                    prompt,
-                    num_samples=5,
-                    device=metric_obj.device
-                )
-
-                # Split response into sentences (simple split)
-                sentences = [s.strip() for s in response.split('.') if s.strip()]
-
-                if len(sentences) == 0:
-                    continue
-
-                # Split response into sentences
-                sentences = [s.strip() for s in response.split('.') if s.strip()]
-
-                if len(sentences) == 0:
-                    continue
-
-                sc_scores = selfcheck_obj.score(sentences, samples)
-
-                # FIXED: expand sentence-level scores to token-level
-                tokens   = metric_obj.tokenizer.tokenize(response)
-                sc_token = np.zeros(len(tokens))
-
-                idx = 0
-                for sent_idx, (sent, score) in enumerate(zip(sentences, sc_scores)):
-                    sent_tokens = metric_obj.tokenizer.tokenize(sent)
-                    for _ in sent_tokens:
-                        if idx >= len(sc_token):   # stop when tokens exhausted
-                            break
-                        sc_token[idx] = float(score)
-                        idx += 1
-
-                token_labels = align_labels_to_tokens(response, word_labels, metric_obj.tokenizer)
                 
-                # In collect_all_metrics, before min_len:
-                if len(ig) == 0 or len(kl) == 0 or len(conf) == 0 or len(token_labels) == 0:
-                    print(f"  Empty array detected: ig={len(ig)}, kl={len(kl)}, conf={len(conf)}, labels={len(token_labels)}")
+                # 2. Tokenize and Align Labels
+                tokens = metric_obj.tokenizer.tokenize(response)
+                token_labels = align_labels_to_tokens(response, word_labels, metric_obj.tokenizer)
+
+                # 3. Lite SelfCheckGPT (Requirement 5)
+        
+                prompt = f"Context: {context}\nQuestion: {query}\nAnswer:"
+                try:
+                    # Generate samples
+                    samples = selfcheck_obj.generate_samples(
+                        metric_obj.model, metric_obj.tokenizer, 
+                        prompt, num_samples=4, max_new_tokens=20, min_new_tokens=15, device=metric_obj.device
+                    )
+                    
+                    # Ensure response is treated as a list of one sentence to avoid tokenizer index errors
+                    sentences_to_score = [response.strip()] if len(response.strip()) > 10 else [response.strip() + " (Full response context)."]
+                    
+                    sc_scores = selfcheck_obj.score(
+                        sentences=sentences_to_score, 
+                        sampled_passages=samples
+                    )
+                    
+                    # Robust extraction of the score
+                    # 1. Handle if sc_scores is a dictionary (common in newer versions)
+                    if isinstance(sc_scores, dict) and 'sent_scores' in sc_scores:
+                        avg_score = np.mean(sc_scores['sent_scores']) if len(sc_scores['sent_scores']) > 0 else 0.0
+                    # 2. Handle if it's a list/array
+                    elif isinstance(sc_scores, (list, np.ndarray)) and len(sc_scores) > 0:
+                        avg_score = float(sc_scores[0])
+                    else:
+                        avg_score = 0.0
+                    
+                    sc_token = np.full(len(tokens), avg_score)
+
+                except Exception as sc_e:
+                    # This now catches the 'list index out of range' and provides a safe fallback
+                    print(f"  SelfCheck failed at sample {current_sample_idx}: {sc_e}") 
+                    sc_token = np.zeros(len(tokens))
+
+                except Exception as sc_e:
+                    # ENSURE THIS MATCHES THE 'i' IN THE FOR LOOP
+                    print(f"  SelfCheck failed at sample {current_sample_idx}: {sc_e}") 
+                    sc_token = np.zeros(len(tokens))
+
+                # 4. Dimension Alignment & Safety Checks
+                min_len = min(len(ig), len(kl), len(conf), len(sc_token), len(token_labels))
+                if min_len == 0:
                     continue
 
-                # Bug 3 fixed — use new variable names, don't overwrite
-                # 1. Align and Slice
-                min_len = min(len(ig), len(kl), len(conf), len(sc_token), len(token_labels))
-                ig_t     = ig[:min_len]
-                kl_t     = kl[:min_len]
-                conf_t   = conf[:min_len]
-                H_with_t = H_with[:min_len]
-                sc_t = sc_token[:min_len]
-                labels_t = token_labels[:min_len]
-                sem_arr  = np.full(min_len, sem_ent_val)
+                ig_t, kl_t, conf_t, sc_t = ig[:min_len], kl[:min_len], conf[:min_len], sc_token[:min_len]
+                ent_t, labels_t = H_with[:min_len], token_labels[:min_len]
+                sem_arr = np.full(min_len, sem_ent_val)
 
-                # 2. Raw scores for temporal analysis (NO smoothing — preserves sharp signal)
-                ig_raw   = -ig_t        # negate: low IG = hallucination
-                kl_raw   = kl_t         # keep: will be auto-oriented later
+                # 5. Requirement 2: Temporal Analysis Prep (Raw Data) 
+                ig_raw   = ig_t     
+                kl_raw   = kl_t
                 conf_raw = conf_t
-                ent_raw  = H_with_t
+                ent_raw  = ent_t
 
-                # 3. Smoothed scores for global AUROC aggregation
-                ig_hal   = smooth_scores(ig_t,   window=3)
-                kl_hal   = smooth_scores(kl_raw,   window=3)
+                # 6. Global Aggregation (Smoothed Data)
+                ig_hal   = smooth_scores(ig_raw, window=3)
+                kl_hal   = smooth_scores(kl_raw, window=3)
                 conf_hal = smooth_scores(conf_raw, window=3)
-                sc_hal = smooth_scores(sc_t, window=3)
-                ent_hal  = smooth_scores(ent_raw,  window=3)
+                sc_hal   = smooth_scores(sc_t, window=3)
+                ent_hal  = smooth_scores(ent_raw, window=3)
 
-                # 4. Global aggregation — smoothed (used for AUROC, E1/E2, E4, E6-E8)
-                all_ig.extend(ig_hal)
-                all_kl.extend(kl_hal)
-                all_conf.extend(conf_hal)
-                all_sc.extend(sc_hal)
-                all_sem.extend(sem_arr)
-                all_ent.extend(ent_hal)
+                all_ig.extend(ig_hal); all_kl.extend(kl_hal); all_conf.extend(conf_hal)
+                all_sc.extend(sc_hal); all_sem.extend(sem_arr); all_ent.extend(ent_hal)
                 all_labels.extend(labels_t)
 
-                # 5. Build per-sample composite using smoothed scores
-                sample_metrics = {
-                    "IG": ig_hal, "KL": kl_hal, "ConfDrop": conf_hal,
-                    "SemEnt": sem_arr, "EntOnly": ent_hal, "SelfCheck": sc_hal
-                }
+                # 7. Composite and Per-Sample Storage
+                sample_metrics = {"IG": ig_hal, "KL": kl_hal, "ConfDrop": conf_hal, 
+                                 "SemEnt": sem_arr, "EntOnly": ent_hal, "SelfCheck": sc_hal}
                 comp = build_composite(sample_metrics, labels_t, mode="variance_weight")
 
-                # 6. Per-sample storage — RAW (used for E3 temporal, NOT smoothed)
-                ig_per_sample.append(ig_raw)       # raw, not smoothed
-                kl_per_sample.append(kl_raw)       # raw, not smoothed
-                conf_per_sample.append(conf_raw)   # raw, not smoothed
-                sem_per_sample.append(sem_arr)     # same either way (constant per sample)
-                ent_per_sample.append(ent_raw)     # raw, not smoothed
-                label_per_sample.append(labels_t)
-                sc_per_sample.append(sc_t)
-                composite_per_sample.append(comp)
+                ig_per_sample.append(ig_raw); kl_per_sample.append(kl_raw)
+                conf_per_sample.append(conf_raw); sem_per_sample.append(sem_arr)
+                ent_per_sample.append(ent_raw); label_per_sample.append(labels_t)
+                sc_per_sample.append(sc_t); composite_per_sample.append(comp)
 
             except Exception as e:
-                print(f"  Skipped sample {i}: {e}")
+                print(f"  Skipped sample {current_sample_idx}: {e}")
                 continue
 
-    # Construct the final data object
     final_data = {
         "tokens": {
-            "IG": np.array(all_ig), "KL": np.array(all_kl),
-            "ConfDrop": np.array(all_conf), "SemEnt": np.array(all_sem),
-            "EntOnly": np.array(all_ent), "SelfCheck": np.array(all_sc), "labels": np.array(all_labels)
+            "IG": np.array(all_ig), "KL": np.array(all_kl), "ConfDrop": np.array(all_conf), 
+            "SemEnt": np.array(all_sem), "EntOnly": np.array(all_ent), "SelfCheck": np.array(all_sc), 
+            "labels": np.array(all_labels)
         },
         "per_sample": {
-            "IG": ig_per_sample, "KL": kl_per_sample,
-            "ConfDrop": conf_per_sample, "SemEnt": sem_per_sample,
-            "EntOnly": ent_per_sample, "SelfCheck": sc_per_sample, "labels": label_per_sample,
-            "composite": composite_per_sample
+            "IG": ig_per_sample, "KL": kl_per_sample, "ConfDrop": conf_per_sample, 
+            "SemEnt": sem_per_sample, "EntOnly": ent_per_sample, "SelfCheck": sc_per_sample, 
+            "labels": label_per_sample, "composite": composite_per_sample
         }
     }
 
-    # SAVE TO DISK IMMEDIATELY
-    import pickle
+    import pickle, os
+    os.makedirs("results", exist_ok=True)
     with open(f"results/checkpoint_{dataset_name}.pkl", "wb") as f:
         pickle.dump(final_data, f)
-    print(f"Saved checkpoint to results/checkpoint_{dataset_name}.pkl")
-
     return final_data
+
 
 
 def run_all_experiments(data, dataset_name):
@@ -375,15 +357,21 @@ def run_all_experiments(data, dataset_name):
 def main():
     
     # ── Load model ────────────────────────────────────────────────
-    metric = InformationGainMetric(model_name="facebook/opt-1.3b")
-    sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
+    # This prevents the "loading weights" bars from appearing 300 times
+    print("Initializing Models and Metric Engines...")
+    
+    # Initialize the base metric (Model stays in GPU memory)
+    metric_engine = InformationGainMetric(model_name="facebook/opt-1.3b")
+    
+    # Initialize dependent metrics using the SAME model/tokenizer/device
+    sem_metric = SemanticEntropyMetric(metric_engine.model, metric_engine.tokenizer, device=metric_engine.device)
 
     selfcheck = SelfCheckBaseline()
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=4)
+    ragtruth = load_ragtruth(max_samples=300)
     ragtruth = ragtruth.shuffle(seed=42)
-    halueval = load_halueval(max_samples=4)
+    halueval = load_halueval(max_samples=300)
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
@@ -405,9 +393,11 @@ def main():
             rt_data = pickle.load(f)
     else:
         print("RAGTruth checkpoint not found. Starting collection...")
-        metric = InformationGainMetric(model_name="facebook/opt-1.3b")
-        sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
-        rt_data = collect_all_metrics(metric, sem_metric, selfcheck, ragtruth, "ragtruth", max_samples=4)
+        # PASS the metric_engine initialized above
+        rt_data = collect_all_metrics(
+            metric_engine, sem_metric, selfcheck, 
+            ragtruth, "ragtruth", max_samples=300
+        )
 
     # HaluEval Checkpoint
     hv_path = "results/checkpoint_halueval.pkl"
@@ -416,11 +406,12 @@ def main():
         with open(hv_path, "rb") as f:
             hv_data = pickle.load(f)
     else:
-        print("HaluEval checkpoint not found. Starting collection...")
-        if metric is None: # Only load model if not already loaded
-            metric = InformationGainMetric(model_name="facebook/opt-1.3b")
-            sem_metric = SemanticEntropyMetric(metric.model, metric.tokenizer, device=metric.device)
-        hv_data = collect_all_metrics(metric, sem_metric, selfcheck, halueval, "halueval", max_samples=4)
+        print("Starting HaluEval collection...")
+        # PASS the same metric_engine
+        hv_data = collect_all_metrics(
+            metric_engine, sem_metric, selfcheck, 
+            halueval, "halueval", max_samples=300
+        )
 
 
 

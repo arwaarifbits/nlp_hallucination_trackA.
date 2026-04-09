@@ -118,28 +118,30 @@ def plot_precursor_distributions(pre_hal_igs, pre_faith_igs, save_dir="results")
 def compute_temporal_precedence(all_metric_arrays: dict,
                                  all_label_arrays: list,
                                  window_range=(-3, 1)) -> dict:
-    """
-    For each hallucinated span's first token t, collect metric values
-    at positions t-3, t-2, t-1, t, t+1.
-    
-    all_metric_arrays: dict of {metric_name: list of np.arrays (one per sample)}
-    all_label_arrays: list of binary np.arrays (one per sample)
-    window_range: (start_offset, end_offset) inclusive
-    
-    Returns dict: {metric_name: {offset: [values...]}}
-    """
     offsets = list(range(window_range[0], window_range[1] + 1))
     metric_names = list(all_metric_arrays.keys())
     
-    # Initialize storage
-    results = {m: {o: [] for o in offsets} for m in metric_names}
+    # --- ADD NORMALIZATION HERE ---
+    # We create a normalized copy of the metric arrays so we don't 
+    # modify the original data outside this function.
+    norm_metric_arrays = {}
+    for m_name in metric_names:
+        # Flatten all arrays for this metric to get global mean/std
+        all_values = np.concatenate(all_metric_arrays[m_name])
+        m_mean = np.mean(all_values)
+        m_std = np.std(all_values) if np.std(all_values) > 0 else 1.0
+        
+        # Apply (x - mean) / std to every array in the list
+        norm_metric_arrays[m_name] = [
+            (arr - m_mean) / m_std for arr in all_metric_arrays[m_name]
+        ]
+    # ------------------------------
 
+    results = {m: {o: [] for o in offsets} for m in metric_names}
     n_samples = len(all_label_arrays)
 
     for sample_idx in range(n_samples):
         labels = all_label_arrays[sample_idx]
-
-        # Find first token of each hallucinated span
         in_span = False
         first_hal_positions = []
         for i, lab in enumerate(labels):
@@ -155,11 +157,11 @@ def compute_temporal_precedence(all_metric_arrays: dict,
                 if pos < 0 or pos >= len(labels):
                     continue
                 for m_name in metric_names:
-                    arr = all_metric_arrays[m_name][sample_idx]
+                    # USE THE NORMALIZED ARRAY HERE
+                    arr = norm_metric_arrays[m_name][sample_idx]
                     if pos < len(arr):
                         results[m_name][offset].append(arr[pos])
 
-    # Compute means
     means = {m: {} for m in metric_names}
     for m in metric_names:
         for o in offsets:
