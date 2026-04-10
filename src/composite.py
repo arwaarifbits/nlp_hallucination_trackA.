@@ -5,12 +5,13 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
 def normalize_score(s):
-    """Standard Min-Max normalization with zero-variance safety."""
-    s = np.nan_to_num(s, nan=0.0, posinf=1.0, neginf=0.0)
+    s = np.nan_to_num(np.array(s), nan=0.0)
+    if s.size == 0:
+        return np.array([])
     s_min, s_max = np.min(s), np.max(s)
-    if (s_max - s_min) < 1e-10:
+    if abs(s_max - s_min) < 1e-9:
         return np.zeros_like(s)
-    return (s - s_min) / (s_max - s_min + 1e-12)
+    return (s - s_min) / (s_max - s_min)
 
 def build_composite(all_metrics: dict, labels: np.ndarray, mode: str = "variance_weight"):
     if not all_metrics:

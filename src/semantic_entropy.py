@@ -67,20 +67,42 @@ class SemanticEntropyMetric:
             clusters.append(cluster)
         return clusters
 
-    def compute_semantic_entropy(self, query: str, context: str,
-                                  num_samples: int = 5) -> float:
-        """
-        Returns a single semantic entropy score for the whole response.
-        We'll use it as a sentence-level (not token-level) score.
-        """
+    import numpy as np
+    import torch
+
+    def compute_semantic_entropy(self, query: str, context: str, 
+                                num_samples: int = 5, 
+                                temperature: float = 0.8) -> float:
         prompt = f"Context: {context}\nQuestion: {query}\nAnswer:"
-        completions = self._sample_completions(prompt, num_samples)
-        clusters = self._cluster_completions(completions)
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+        
+        # 1. Generate samples
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids,
+                max_new_tokens=20, # Keep it short for speed!
+                num_return_sequences=num_samples,
+                do_sample=True,
+                temperature=temperature,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+        
+        generated_texts = [
+            self.tokenizer.decode(o[input_ids.shape[-1]:], skip_special_tokens=True).strip() 
+            for o in outputs
+        ]
 
-        # Probability of each cluster = fraction of completions in it
-        n = len(completions)
-        cluster_probs = np.array([len(c) / n for c in clusters])
-
-        # Shannon entropy over clusters
-        entropy = -np.sum(cluster_probs * np.log(cluster_probs + 1e-10))
-        return float(entropy)
+        # 2. Simple Semantic Grouping (Replacing the missing NLI method)
+        # We group identical or near-identical strings
+        unique_responses = {}
+        for text in generated_texts:
+            # Simple normalization: lowercase and strip punctuation
+            norm_text = "".join(filter(str.isalnum, text.lower()))
+            unique_responses[norm_text] = unique_responses.get(norm_text, 0) + 1
+        
+        # 3. Calculate Entropy
+        counts = list(unique_responses.values())
+        probs = [c / sum(counts) for c in counts]
+        s_ent = -sum(p * np.log(p) for p in probs if p > 0)
+        
+        return float(s_ent)

@@ -90,26 +90,39 @@ class InformationGainMetric:
 
     def compute_information_gain(self, query: str, context: str, response: str):
         """
-        Main metric computation.
+        Main metric computation with Logit-Bias (Length) Correction.
         
         Returns:
-            ig: np.array [resp_tokens] — information gain per token
+            ig: np.array [resp_tokens] — normalized information gain per token
             H_no_ctx: np.array — entropy without context
             H_with_ctx: np.array — entropy with context
         """
-        # WITHOUT context
+        # 0. Get tokens to calculate lengths for bias correction
+        tokens = self.tokenizer.tokenize(response)
+        # OPT tokenizer uses 'Ġ' for spaces; we remove it to get actual character length
+        token_lengths = np.array([len(t.replace('Ġ', '')) for t in tokens])
+
+        # 1. WITHOUT context
         prompt_no_ctx = f"Question: {query}\nAnswer:"
         logits_no_ctx = self._get_logits(prompt_no_ctx, response)
         H_no_ctx = self._entropy(logits_no_ctx)
 
-        # WITH context
+        # 2. WITH context
         prompt_with_ctx = f"Context: {context}\nQuestion: {query}\nAnswer:"
         logits_with_ctx = self._get_logits(prompt_with_ctx, response)
         H_with_ctx = self._entropy(logits_with_ctx)
 
-        # Align lengths (may differ by 1 due to tokenization edge cases)
-        min_len = min(len(H_no_ctx), len(H_with_ctx))
-        ig = H_no_ctx[:min_len] - H_with_ctx[:min_len]
+        # 3. Align lengths
+        min_len = min(len(H_no_ctx), len(H_with_ctx), len(token_lengths))
+        
+        # 4. Compute Raw IG
+        # H_no_ctx - H_with_ctx: Positive if context reduced uncertainty
+        raw_ig = H_no_ctx[:min_len] - H_with_ctx[:min_len]
+
+        # 5. Apply Logit-Bias Correction (Length Normalization)
+        # np.log1p(x) is log(1+x), ensuring we don't multiply by 0 for 1-char tokens
+        # This amplifies IG for long words (factual) and dampens it for punctuation/stop-words
+        ig = raw_ig * np.log1p(token_lengths[:min_len])
 
         return ig, H_no_ctx[:min_len], H_with_ctx[:min_len]
 

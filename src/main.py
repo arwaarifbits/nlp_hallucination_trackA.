@@ -63,11 +63,15 @@ def orient_score(scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
     except:
         return scores
 
-def smooth_scores(scores: np.ndarray, window: int = 3) -> np.ndarray:
-    """Apply a sliding window average to token-level scores."""
+def smooth_scores(scores: np.ndarray, window: int = 5) -> np.ndarray:
+    """
+    Apply CAUSAL smoothing. 
+    A peak at t-1 will now stay at t-1 instead of being pulled into t+1.
+    """
     if len(scores) < window:
         return scores
-    return uniform_filter1d(scores.astype(float), size=window, mode='nearest')
+    # Use a simple moving average that only looks at current and past tokens
+    return pd.Series(scores).rolling(window=window, min_periods=1).mean().values
 
 def expected_calibration_error(scores, labels, n_bins=10):
     """ECE: lower is better (0 = perfectly calibrated)."""
@@ -96,6 +100,41 @@ def row_for_table(name, scores, labels):
         "Spearman ρ": spearman_rho(scores, labels),
         "ECE": expected_calibration_error(norm, labels),
     }
+
+import nltk
+nltk.download('punkt')
+nltk.download('punkt_tab')
+
+def apply_sentence_smoothing(tokens, scores):
+    """Averages token scores across their respective sentences."""
+    # Convert tokens to a clean string for NLTK
+    # OPT uses 'Ġ' for space; we convert it to actual spaces for sentence detection
+    clean_text = "".join([t.replace('Ġ', ' ') for t in tokens])
+    
+    # Get sentence boundaries
+    sentences = nltk.sent_tokenize(clean_text)
+    smoothed_scores = np.zeros_like(scores)
+    
+    curr_token_idx = 0
+    # Re-map the scores back to tokens sentence by sentence
+    for sent in sentences:
+        # Tokenize the sentence back to words to estimate the token count
+        sent_words = nltk.word_tokenize(sent)
+        # Find how many of our original tokens match this sentence length
+        # (Approximate mapping: usually 1 word = 1.2 tokens)
+        sent_len = len(sent_words) 
+        
+        # Determine the end bound for this sentence in our score array
+        end_idx = min(curr_token_idx + sent_len, len(scores))
+        
+        if curr_token_idx < end_idx:
+            # Calculate the average uncertainty for this sentence
+            avg_val = np.mean(scores[curr_token_idx:end_idx])
+            smoothed_scores[curr_token_idx:end_idx] = avg_val
+            
+        curr_token_idx = end_idx
+        
+    return smoothed_scores
 
 # ─── main collection loop ────────────────────────────────────────────────────
 
@@ -128,7 +167,7 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
                 ig, H_no, H_with = metric_obj.compute_information_gain(query, context, response)
                 kl   = metric_obj.compute_kl_divergence(query, context, response)
                 conf = metric_obj.compute_confidence_drop(query, context, response)
-                sem_ent_val = sem_entropy_obj.compute_semantic_entropy(query, context, num_samples=5)
+                sem_ent_val = sem_entropy_obj.compute_semantic_entropy(query, context, num_samples=3, temperature=0.8)
                 
                 # 2. Tokenize and Align Labels
                 tokens = metric_obj.tokenizer.tokenize(response)
@@ -175,19 +214,32 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
                 conf_raw = conf_t
                 ent_raw  = ent_t
 
-                # 6. Global Aggregation (Smoothed Data)
-                ig_hal   = smooth_scores(ig_raw, window=3)
-                kl_hal   = smooth_scores(kl_raw, window=3)
-                conf_hal = smooth_scores(conf_raw, window=3)
-                sc_hal   = smooth_scores(sc_t, window=3)
-                ent_hal  = smooth_scores(ent_raw, window=3)
+                # 5. Apply Sentence-Level Smoothing (The AUROC Booster)
+                # This averages the "jitters" across the whole sentence context
+                ig_smoothed   = apply_sentence_smoothing(tokens[:min_len], ig_t)
+                kl_smoothed   = apply_sentence_smoothing(tokens[:min_len], kl_t)
+                conf_smoothed = apply_sentence_smoothing(tokens[:min_len], conf_t)
+                ent_smoothed  = apply_sentence_smoothing(tokens[:min_len], ent_t)
+
+                # 6. Apply Causal Window Smoothing (The Temporal Fix)
+                # We use the window of 5 here to see the "build-up" before a hallucination
+                ig_hal   = smooth_scores(ig_smoothed, window=5)
+                kl_hal   = smooth_scores(kl_smoothed, window=5)
+                conf_hal = smooth_scores(conf_smoothed, window=5)
+                sc_hal   = smooth_scores(sc_t, window=5)
+                ent_hal  = smooth_scores(ent_smoothed, window=5)
+
 
                 all_ig.extend(ig_hal); all_kl.extend(kl_hal); all_conf.extend(conf_hal)
                 all_sc.extend(sc_hal); all_sem.extend(sem_arr); all_ent.extend(ent_hal)
                 all_labels.extend(labels_t)
 
+                # Before storing in sample_metrics:
+                ig_lead = np.roll(ig_hal, 1) # Shift scores forward so t-1 uncertainty aligns with t label
+                ig_lead[0] = ig_hal[0]
+
                 # 7. Composite and Per-Sample Storage
-                sample_metrics = {"IG": ig_hal, "KL": kl_hal, "ConfDrop": conf_hal, 
+                sample_metrics = {"IG_Lead": ig_lead, "IG": ig_hal, "KL": kl_hal, "ConfDrop": conf_hal, 
                                  "SemEnt": sem_arr, "EntOnly": ent_hal, "SelfCheck": sc_hal}
                 comp = build_composite(sample_metrics, labels_t, mode="variance_weight")
 
