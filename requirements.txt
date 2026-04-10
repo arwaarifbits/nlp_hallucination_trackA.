@@ -10,3 +10,4 @@ seaborn
 tqdm
 jupyter
 accelerate
+selfcheckgpt

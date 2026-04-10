@@ -1,4 +1,8 @@
 # src/main.py  — full rewrite covering E1–E8
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TQDM_DISABLE"] = "1"   # disables ALL tqdm progress bars globally
+
 
 import numpy as np
 import pandas as pd
@@ -96,7 +100,7 @@ def row_for_table(name, scores, labels):
 # ─── main collection loop ────────────────────────────────────────────────────
 
 def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset, 
-                        dataset_name, max_samples=300):
+                        dataset_name, max_samples=150):
     all_ig, all_kl, all_conf, all_sem, all_ent, all_sc, all_labels = [], [], [], [], [], [], []
     ig_per_sample, kl_per_sample, conf_per_sample, sc_per_sample = [], [], [], []
     sem_per_sample, ent_per_sample = [], []
@@ -130,44 +134,30 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
                 tokens = metric_obj.tokenizer.tokenize(response)
                 token_labels = align_labels_to_tokens(response, word_labels, metric_obj.tokenizer)
 
-                # 3. Lite SelfCheckGPT (Requirement 5)
         
+                # 3. SelfCheckGPT
                 prompt = f"Context: {context}\nQuestion: {query}\nAnswer:"
                 try:
-                    # Generate samples
                     samples = selfcheck_obj.generate_samples(
-                        metric_obj.model, metric_obj.tokenizer, 
-                        prompt, num_samples=4, max_new_tokens=20, min_new_tokens=15, device=metric_obj.device
+                        metric_obj.model, metric_obj.tokenizer,
+                        prompt, num_samples=4, max_new_tokens=40,
+                        device=metric_obj.device
                     )
-                    
-                    # Ensure response is treated as a list of one sentence to avoid tokenizer index errors
-                    sentences_to_score = [response.strip()] if len(response.strip()) > 10 else [response.strip() + " (Full response context)."]
-                    
+                    sentences_to_score = [response.strip()] if response.strip() else ["no response"]
                     sc_scores = selfcheck_obj.score(
-                        sentences=sentences_to_score, 
+                        sentences=sentences_to_score,
                         sampled_passages=samples
                     )
-                    
-                    # Robust extraction of the score
-                    # 1. Handle if sc_scores is a dictionary (common in newer versions)
                     if isinstance(sc_scores, dict) and 'sent_scores' in sc_scores:
-                        avg_score = np.mean(sc_scores['sent_scores']) if len(sc_scores['sent_scores']) > 0 else 0.0
-                    # 2. Handle if it's a list/array
+                        avg_score = float(np.mean(sc_scores['sent_scores'])) if sc_scores['sent_scores'] else 0.0
                     elif isinstance(sc_scores, (list, np.ndarray)) and len(sc_scores) > 0:
                         avg_score = float(sc_scores[0])
                     else:
                         avg_score = 0.0
-                    
                     sc_token = np.full(len(tokens), avg_score)
 
                 except Exception as sc_e:
-                    # This now catches the 'list index out of range' and provides a safe fallback
-                    print(f"  SelfCheck failed at sample {current_sample_idx}: {sc_e}") 
-                    sc_token = np.zeros(len(tokens))
-
-                except Exception as sc_e:
-                    # ENSURE THIS MATCHES THE 'i' IN THE FOR LOOP
-                    print(f"  SelfCheck failed at sample {current_sample_idx}: {sc_e}") 
+                    print(f"  SelfCheck failed at sample {current_sample_idx}: {sc_e}")
                     sc_token = np.zeros(len(tokens))
 
                 # 4. Dimension Alignment & Safety Checks
@@ -369,9 +359,9 @@ def main():
     selfcheck = SelfCheckBaseline()
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=300)
+    ragtruth = load_ragtruth(max_samples=150)
     ragtruth = ragtruth.shuffle(seed=42)
-    halueval = load_halueval(max_samples=300)
+    halueval = load_halueval(max_samples=150)
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
@@ -396,7 +386,7 @@ def main():
         # PASS the metric_engine initialized above
         rt_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            ragtruth, "ragtruth", max_samples=300
+            ragtruth, "ragtruth", max_samples=150
         )
 
     # HaluEval Checkpoint
@@ -410,7 +400,7 @@ def main():
         # PASS the same metric_engine
         hv_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            halueval, "halueval", max_samples=300
+            halueval, "halueval", max_samples=150
         )
 
 

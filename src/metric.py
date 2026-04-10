@@ -5,35 +5,37 @@ import numpy as np
 
 class InformationGainMetric:
     def __init__(self, model_name="facebook/opt-1.3b"):
-        """
-        Recommended models (in order of preference by resource):
-        - "facebook/opt-1.3b"    (fast, ~5GB RAM, good for testing)
-        - "facebook/opt-2.7b"    (better quality)
-        - "meta-llama/Llama-2-7b-hf"  (best, needs HuggingFace token)
-        """
         print(f"Loading model: {model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Check for CUDA (NVIDIA), then MP(Apple), then fall back to CPU
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer.pad_token     = self.tokenizer.eos_token
+        self.tokenizer.padding_side  = "left"
+
         if torch.cuda.is_available():
-            self.device = "cuda"
+            self.device   = "cuda"
+            dtype         = torch.float16
+            device_map    = "auto"
         elif torch.backends.mps.is_available():
-            self.device = "mps"
+            self.device   = "mps"
+            dtype         = torch.float16
+            device_map    = None
         else:
-            self.device = "cpu"
-        
-        print(f"Device: {self.device}")
-        
-        # Set precision: float16 for GPU (CUDA/MPS), float32 for CPU
-        # Note: CUDA also supports bfloat16 if the hardware is modern (A100/H100/L4)
-        dtype = torch.float16 if self.device != "cpu" else torch.float32
-        
+            self.device   = "cpu"
+            dtype         = torch.float32
+            device_map    = None
+
+        print(f"Device: {self.device} | Precision: {dtype}")
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=dtype
-        ).to(self.device)
-        
+            torch_dtype=dtype,
+            device_map=device_map
+        )
+
+        if device_map is None:
+            self.model = self.model.to(self.device)
+
+        # DO NOT call resize_token_embeddings — it corrupts CUDA gather indices
         self.model.eval()
         self.model_name = model_name
 
