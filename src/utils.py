@@ -4,26 +4,27 @@ import pickle, os
 import pandas as pd
 import ast
 
-def load_ragtruth(max_samples=None):
-    # 1. Load the full dataset
+def load_ragtruth(max_samples=150):
     df_all = pd.read_csv("data/ragtruth/ragtruth.csv")
-
-    # 2. Basic stats for your own info
-    is_hallucination = df_all['labels'].apply(lambda x: len(str(x)) > 2)
-    print(f"  [Data Setup] Total dataset: {len(df_all)} samples.")
-    print(f"  [Data Setup] Natural distribution: {is_hallucination.sum()} hallucinated, {len(df_all) - is_hallucination.sum()} clean.")
-
-    if max_samples:
-        # We take the FIRST max_samples to keep it reproducible (held-out test set logic)
-        final_df = df_all.head(max_samples).copy()
-    else:
-        final_df = df_all.copy()
-
-    # 4. Final stats
-    final_hal_count = final_df['labels'].apply(lambda x: len(str(x)) > 2).sum()
-    print(f"  [Data Setup] Final dataset: {len(final_df)} samples.")
-    print(f"  [Data Setup] Test Set Mix: {final_hal_count} Hallucinated / {len(final_df) - final_hal_count} Clean.")
     
+    # 1. Clean the labels immediately
+    def is_hal(val):
+        if pd.isna(val) or val == "[]" or val == "":
+            return False
+        # If there's a list with at least one dictionary, it's a hallucination
+        return True
+
+    # 2. Use the correct logic for the natural distribution stats
+    hal_mask = df_all['labels'].apply(is_hal)
+    
+    print(f"  [Data Setup] Total dataset: {len(df_all)} samples.")
+    print(f"  [Data Setup] Natural distribution: {hal_mask.sum()} hallucinated, {len(df_all) - hal_mask.sum()} clean.")
+
+    # 3. Create the balanced mix for your 150 samples
+    df_hal = df_all[hal_mask].head(76)
+    df_clean = df_all[~hal_mask].head(74)
+    final_df = pd.concat([df_hal, df_clean]).sample(frac=1, random_state=42)
+
     return Dataset.from_pandas(final_df.reset_index(drop=True))
 
 
