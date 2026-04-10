@@ -139,7 +139,7 @@ def apply_sentence_smoothing(tokens, scores):
 # ─── main collection loop ────────────────────────────────────────────────────
 
 def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset, 
-                        dataset_name, max_samples=150):
+                        dataset_name, max_samples=50):
     all_ig, all_kl, all_conf, all_sem, all_ent, all_sc, all_labels = [], [], [], [], [], [], []
     ig_per_sample, kl_per_sample, conf_per_sample, sc_per_sample = [], [], [], []
     sem_per_sample, ent_per_sample = [], []
@@ -411,9 +411,9 @@ def main():
     selfcheck = SelfCheckBaseline()
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=150)
+    ragtruth = load_ragtruth(max_samples=50)
     ragtruth = ragtruth.shuffle(seed=42)
-    halueval = load_halueval(max_samples=150)
+    halueval = load_halueval(max_samples=50)
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
@@ -438,7 +438,7 @@ def main():
         # PASS the metric_engine initialized above
         rt_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            ragtruth, "ragtruth", max_samples=150
+            ragtruth, "ragtruth", max_samples=50
         )
 
     # HaluEval Checkpoint
@@ -452,7 +452,7 @@ def main():
         # PASS the same metric_engine
         hv_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            halueval, "halueval", max_samples=150
+            halueval, "halueval", max_samples=50
         )
 
 
