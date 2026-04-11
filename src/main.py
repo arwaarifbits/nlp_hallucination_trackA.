@@ -139,16 +139,40 @@ def apply_sentence_smoothing(tokens, scores):
 # ─── main collection loop ────────────────────────────────────────────────────
 
 def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset, 
-                        dataset_name, max_samples=50):
-    all_ig, all_kl, all_conf, all_sem, all_ent, all_sc, all_labels = [], [], [], [], [], [], []
-    ig_per_sample, kl_per_sample, conf_per_sample, sc_per_sample = [], [], [], []
-    sem_per_sample, ent_per_sample = [], []
-    label_per_sample, composite_per_sample = [], []
+                        dataset_name, max_samples=100, existing_data=None):
+    # --- ADD THIS LOGIC ---
+    if existing_data is not None:
+        print(f"Resuming {dataset_name} from {len(existing_data['per_sample']['labels'])} samples...")
+        all_ig = list(existing_data["tokens"]["IG"])
+        all_kl = list(existing_data["tokens"]["KL"])
+        all_conf = list(existing_data["tokens"]["ConfDrop"])
+        all_sem = list(existing_data["tokens"]["SemEnt"])
+        all_ent = list(existing_data["tokens"]["EntOnly"])
+        all_sc = list(existing_data["tokens"]["SelfCheck"])
+        all_labels = list(existing_data["tokens"]["labels"])
+        
+        ig_per_sample = existing_data["per_sample"]["IG"]
+        kl_per_sample = existing_data["per_sample"]["KL"]
+        conf_per_sample = existing_data["per_sample"]["ConfDrop"]
+        sem_per_sample = existing_data["per_sample"]["SemEnt"]
+        ent_per_sample = existing_data["per_sample"]["EntOnly"]
+        sc_per_sample = existing_data["per_sample"]["SelfCheck"]
+        label_per_sample = existing_data["per_sample"]["labels"]
+        composite_per_sample = existing_data["per_sample"]["composite"]
+        
+        start_idx = len(label_per_sample)
+    else:
+        all_ig, all_kl, all_conf, all_sem, all_ent, all_sc, all_labels = [], [], [], [], [], [], []
+        ig_per_sample, kl_per_sample, conf_per_sample, sc_per_sample = [], [], [], []
+        sem_per_sample, ent_per_sample = [], []
+        label_per_sample, composite_per_sample = [], []
+        start_idx = 0
 
-    for i, sample in enumerate(tqdm(dataset.select(range(min(max_samples, len(dataset)))), 
+    # Wrap the range in the select() call properly
+    for i, sample in enumerate(tqdm(dataset.select(range(start_idx, min(max_samples, len(dataset)))), 
                                     desc=f"{dataset_name}")):
         
-        current_sample_idx = i
+        current_sample_idx = start_idx + i
 
         variations = []
         if dataset_name == "ragtruth":
@@ -411,9 +435,9 @@ def main():
     selfcheck = SelfCheckBaseline()
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=50)
+    ragtruth = load_ragtruth(max_samples=150)
     ragtruth = ragtruth.shuffle(seed=42)
-    halueval = load_halueval(max_samples=50)
+    halueval = load_halueval(max_samples=150)
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
@@ -425,37 +449,56 @@ def main():
 
 
 
-    # ── Collect metrics (With Checkpoint Logic) ───────────────────
+    # ── Collect metrics (With "Resume and Extend" Logic) ───────────
     
+    target_samples = 150  # Set your target here once for consistency
+
     # RAGTruth Checkpoint
     rt_path = "results/checkpoint_ragtruth.pkl"
+    rt_data = None
     if os.path.exists(rt_path):
-        print(f"--- Loading RAGTruth from checkpoint: {rt_path} ---")
         with open(rt_path, "rb") as f:
             rt_data = pickle.load(f)
+        
+        # Check if we already reached or exceeded the target
+        current_count = len(rt_data["per_sample"]["labels"])
+        if current_count >= target_samples:
+            print(f"--- RAGTruth already has {current_count} samples. Skipping to experiments. ---")
+        else:
+            print(f"--- RAGTruth has {current_count}/{target_samples} samples. Extending... ---")
+            rt_data = collect_all_metrics(
+                metric_engine, sem_metric, selfcheck, 
+                ragtruth, "ragtruth", max_samples=target_samples, existing_data=rt_data
+            )
     else:
-        print("RAGTruth checkpoint not found. Starting collection...")
-        # PASS the metric_engine initialized above
+        print("RAGTruth checkpoint not found. Starting fresh...")
         rt_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            ragtruth, "ragtruth", max_samples=50
+            ragtruth, "ragtruth", max_samples=target_samples, existing_data=None
         )
 
     # HaluEval Checkpoint
     hv_path = "results/checkpoint_halueval.pkl"
+    hv_data = None
     if os.path.exists(hv_path):
-        print(f"--- Loading HaluEval from checkpoint: {hv_path} ---")
         with open(hv_path, "rb") as f:
             hv_data = pickle.load(f)
+            
+        current_count = len(hv_data["per_sample"]["labels"])
+        if current_count >= target_samples:
+            print(f"--- HaluEval already has {current_count} samples. Skipping to experiments. ---")
+        else:
+            print(f"--- HaluEval has {current_count}/{target_samples} samples. Extending... ---")
+            hv_data = collect_all_metrics(
+                metric_engine, sem_metric, selfcheck, 
+                halueval, "halueval", max_samples=target_samples, existing_data=hv_data
+            )
     else:
-        print("Starting HaluEval collection...")
-        # PASS the same metric_engine
+        print("HaluEval checkpoint not found. Starting fresh...")
         hv_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            halueval, "halueval", max_samples=50
+            halueval, "halueval", max_samples=target_samples, existing_data=None
         )
-
-
 
     # ── Run experiments ───────────────────────────────────────────
     df_rt = run_all_experiments(rt_data, "ragtruth")

@@ -5,37 +5,35 @@ import numpy as np
 
 class InformationGainMetric:
     def __init__(self, model_name="facebook/opt-1.3b"):
+        """
+        Recommended models (in order of preference by resource):
+        - "facebook/opt-1.3b"    (fast, ~5GB RAM, good for testing)
+        - "facebook/opt-2.7b"    (better quality)
+        - "meta-llama/Llama-2-7b-hf"  (best, needs HuggingFace token)
+        """
         print(f"Loading model: {model_name}")
-
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer.pad_token     = self.tokenizer.eos_token
-        self.tokenizer.padding_side  = "left"
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        # Check for CUDA (NVIDIA), then MP(Apple), then fall back to CPU
         if torch.cuda.is_available():
-            self.device   = "cuda"
-            dtype         = torch.float16
-            device_map    = "auto"
+            self.device = "cuda"
         elif torch.backends.mps.is_available():
-            self.device   = "mps"
-            dtype         = torch.float16
-            device_map    = None
+            self.device = "mps"
         else:
-            self.device   = "cpu"
-            dtype         = torch.float32
-            device_map    = None
-
-        print(f"Device: {self.device} | Precision: {dtype}")
-
+            self.device = "cpu"
+        
+        print(f"Device: {self.device}")
+        
+        # Set precision: float16 for GPU (CUDA/MPS), float32 for CPU
+        # Note: CUDA also supports bfloat16 if the hardware is modern (A100/H100/L4)
+        dtype = torch.float16 if self.device != "cpu" else torch.float32
+        
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=dtype,
-            device_map=device_map
-        )
-
-        if device_map is None:
-            self.model = self.model.to(self.device)
-
-        # DO NOT call resize_token_embeddings — it corrupts CUDA gather indices
+            torch_dtype=dtype
+        ).to(self.device)
+        
         self.model.eval()
         self.model_name = model_name
 
@@ -90,39 +88,26 @@ class InformationGainMetric:
 
     def compute_information_gain(self, query: str, context: str, response: str):
         """
-        Main metric computation with Logit-Bias (Length) Correction.
+        Main metric computation.
         
         Returns:
-            ig: np.array [resp_tokens] — normalized information gain per token
+            ig: np.array [resp_tokens] — information gain per token
             H_no_ctx: np.array — entropy without context
             H_with_ctx: np.array — entropy with context
         """
-        # 0. Get tokens to calculate lengths for bias correction
-        tokens = self.tokenizer.tokenize(response)
-        # OPT tokenizer uses 'Ġ' for spaces; we remove it to get actual character length
-        token_lengths = np.array([len(t.replace('Ġ', '')) for t in tokens])
-
-        # 1. WITHOUT context
+        # WITHOUT context
         prompt_no_ctx = f"Question: {query}\nAnswer:"
         logits_no_ctx = self._get_logits(prompt_no_ctx, response)
         H_no_ctx = self._entropy(logits_no_ctx)
 
-        # 2. WITH context
+        # WITH context
         prompt_with_ctx = f"Context: {context}\nQuestion: {query}\nAnswer:"
         logits_with_ctx = self._get_logits(prompt_with_ctx, response)
         H_with_ctx = self._entropy(logits_with_ctx)
 
-        # 3. Align lengths
-        min_len = min(len(H_no_ctx), len(H_with_ctx), len(token_lengths))
-        
-        # 4. Compute Raw IG
-        # H_no_ctx - H_with_ctx: Positive if context reduced uncertainty
-        raw_ig = H_no_ctx[:min_len] - H_with_ctx[:min_len]
-
-        # 5. Apply Logit-Bias Correction (Length Normalization)
-        # np.log1p(x) is log(1+x), ensuring we don't multiply by 0 for 1-char tokens
-        # This amplifies IG for long words (factual) and dampens it for punctuation/stop-words
-        ig = raw_ig * np.log1p(token_lengths[:min_len])
+        # Align lengths (may differ by 1 due to tokenization edge cases)
+        min_len = min(len(H_no_ctx), len(H_with_ctx))
+        ig = H_no_ctx[:min_len] - H_with_ctx[:min_len]
 
         return ig, H_no_ctx[:min_len], H_with_ctx[:min_len]
 

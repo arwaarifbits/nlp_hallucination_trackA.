@@ -11,7 +11,6 @@ def load_ragtruth(max_samples=150):
     def is_hal(val):
         if pd.isna(val) or val == "[]" or val == "":
             return False
-        # If there's a list with at least one dictionary, it's a hallucination
         return True
 
     # 2. Use the correct logic for the natural distribution stats
@@ -20,9 +19,23 @@ def load_ragtruth(max_samples=150):
     print(f"  [Data Setup] Total dataset: {len(df_all)} samples.")
     print(f"  [Data Setup] Natural distribution: {hal_mask.sum()} hallucinated, {len(df_all) - hal_mask.sum()} clean.")
 
-    # 3. Create the balanced mix for your 150 samples
-    df_hal = df_all[hal_mask].head(76)
-    df_clean = df_all[~hal_mask].head(74)
+    # ─── BALANCE LOGIC ───────────────────────────────────────────
+    # Calculate half of the requested total
+    #half_target = max_samples // 2
+    
+    # Select the samples dynamically
+    # .head() ensures we take only up to half_target
+    #df_hal = df_all[hal_mask].head(half_target)
+    #df_clean = df_all[~hal_mask].head(half_target)
+
+    # TEMP- We already have 100 samples in the checkpoint (mostly clean).
+    # To reach 150, we want to specifically fetch 50 hallucinated samples.
+    df_hal = df_all[hal_mask].iloc[1:51] # Skipping the 1st one you already have
+    df_clean = df_all[~hal_mask].head(100) # Your existing 99 + 1 more
+    
+    #print(f"  [Balance] Sampling {len(df_hal)} hallucinated and {len(df_clean)} clean samples.")
+
+    # Combine and shuffle
     final_df = pd.concat([df_hal, df_clean]).sample(frac=1, random_state=42)
 
     return Dataset.from_pandas(final_df.reset_index(drop=True))
