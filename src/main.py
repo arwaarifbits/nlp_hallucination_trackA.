@@ -139,7 +139,7 @@ def apply_sentence_smoothing(tokens, scores):
 # ─── main collection loop ────────────────────────────────────────────────────
 
 def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset, 
-                        dataset_name, max_samples=100, existing_data=None):
+                        dataset_name, max_samples=300, existing_data=None):
     # --- ADD THIS LOGIC ---
     if existing_data is not None:
         print(f"Resuming {dataset_name} from {len(existing_data['per_sample']['labels'])} samples...")
@@ -435,9 +435,9 @@ def main():
     selfcheck = SelfCheckBaseline()
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=150)
+    ragtruth = load_ragtruth(max_samples=300)
     ragtruth = ragtruth.shuffle(seed=42)
-    halueval = load_halueval(max_samples=150)
+    halueval = load_halueval(max_samples=300)
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
@@ -451,7 +451,7 @@ def main():
 
     # ── Collect metrics (With "Resume and Extend" Logic) ───────────
     
-    target_samples = 150  # Set your target here once for consistency
+    target_samples = 300  # Set your target here once for consistency
 
     # RAGTruth Checkpoint
     rt_path = "results/checkpoint_ragtruth.pkl"

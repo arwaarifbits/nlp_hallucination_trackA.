@@ -31,7 +31,7 @@ class InformationGainMetric:
         
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=dtype
+            dtype=dtype
         ).to(self.device)
         
         self.model.eval()

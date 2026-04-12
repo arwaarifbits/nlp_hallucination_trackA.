@@ -4,14 +4,19 @@ import pickle, os
 import pandas as pd
 import ast
 
-def load_ragtruth(max_samples=150):
+def load_ragtruth(max_samples=300):
     df_all = pd.read_csv("data/ragtruth/ragtruth.csv")
     
     # 1. Clean the labels immediately
     def is_hal(val):
         if pd.isna(val) or val == "[]" or val == "":
             return False
-        return True
+        try:
+            # Parse the string representation of the list
+            parsed = ast.literal_eval(val)
+            return len(parsed) > 0
+        except:
+            return False
 
     # 2. Use the correct logic for the natural distribution stats
     hal_mask = df_all['labels'].apply(is_hal)
@@ -30,10 +35,25 @@ def load_ragtruth(max_samples=150):
 
     # TEMP- We already have 100 samples in the checkpoint (mostly clean).
     # To reach 150, we want to specifically fetch 50 hallucinated samples.
-    df_hal = df_all[hal_mask].iloc[1:51] # Skipping the 1st one you already have
-    df_clean = df_all[~hal_mask].head(100) # Your existing 99 + 1 more
+    df_hal = df_all[hal_mask].iloc[0:150] # Skipping the 1st one you already have
+    df_clean = df_all[~hal_mask].iloc[0:150] # Your existing 99 + 1 more
     
     #print(f"  [Balance] Sampling {len(df_hal)} hallucinated and {len(df_clean)} clean samples.")
+
+
+    # ─── MODIFIED BALANCE LOGIC ───────────────────────────────────────────
+    # We target 115 Hallucinated samples and 85 Clean samples to reach 200 total.
+    # Adjusting .iloc indices to skip what you've already processed.
+    
+    # Selecting 115 hallucinated samples (the 65 you have + 50 new ones)
+    #df_hal = df_all[hal_mask].iloc[0:115] 
+    
+    # Selecting the 85 clean samples you already have
+    #df_clean = df_all[~hal_mask].iloc[0:85] 
+    print(f"  [Balance] Current Checkpoint: 88 Hal / 112 Normal")
+    print(f"  [Balance] New Target: {len(df_hal)} Hallucinated and {len(df_clean)} Normal.")
+
+
 
     # Combine and shuffle
     final_df = pd.concat([df_hal, df_clean]).sample(frac=1, random_state=42)

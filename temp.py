@@ -36,3 +36,4 @@ def check_hallucination_split(filepath):
 
 check_hallucination_split('results/checkpoint_halueval.pkl')
 check_hallucination_split('results/checkpoint_ragtruth.pkl')
+
