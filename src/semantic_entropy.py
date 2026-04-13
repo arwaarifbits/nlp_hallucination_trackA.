@@ -81,7 +81,7 @@ class SemanticEntropyMetric:
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids,
-                max_new_tokens=10, # Keep it short for speed!
+                max_new_tokens=15, # Keep it short for speed!
                 num_return_sequences=num_samples,
                 do_sample=True,
                 temperature=temperature,

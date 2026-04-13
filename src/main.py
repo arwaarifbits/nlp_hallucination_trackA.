@@ -1,5 +1,6 @@
 # src/main.py  — full rewrite covering E1–E8
 import os
+import pickle
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TQDM_DISABLE"] = "1"   # disables ALL tqdm progress bars globally
 
@@ -138,7 +139,7 @@ def apply_sentence_smoothing(tokens, scores):
 # ─── main collection loop ────────────────────────────────────────────────────
 
 def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset, 
-                        dataset_name, max_samples=500, existing_data=None):
+                        dataset_name, max_samples=800, existing_data=None):
     # --- ADD THIS LOGIC ---
     if existing_data is not None:
         print(f"Resuming {dataset_name} from {len(existing_data['per_sample']['labels'])} samples...")
@@ -275,6 +276,33 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
                 print(f"  Skipped sample {current_sample_idx}: {e}")
                 continue
 
+        # --- SAFE AUTO-SAVE BLOCK ---
+        if (i + 1) % 10 == 0:
+            final_data = {
+                "tokens": {
+                    "IG": np.array(all_ig), "KL": np.array(all_kl), "ConfDrop": np.array(all_conf), 
+                    "SemEnt": np.array(all_sem), "EntOnly": np.array(all_ent), "SelfCheck": np.array(all_sc), 
+                    "labels": np.array(all_labels)
+                },
+                "per_sample": {
+                    "IG": ig_per_sample, "KL": kl_per_sample, "ConfDrop": conf_per_sample, 
+                    "SemEnt": sem_per_sample, "EntOnly": ent_per_sample, "SelfCheck": sc_per_sample, 
+                    "labels": label_per_sample, "composite": composite_per_sample
+                }
+            }
+            checkpoint_path = f"results/checkpoint_{dataset_name}.pkl"
+            temp_path = checkpoint_path + ".tmp"
+            
+            try:
+                # Save to a temporary file first
+                with open(temp_path, "wb") as f:
+                    pickle.dump(final_data, f)
+                # If successful, rename it to the real checkpoint path
+                os.replace(temp_path, checkpoint_path)
+                print(f"  [Auto-Save] {dataset_name} updated at {current_sample_idx + 1}")
+            except Exception as e:
+                print(f"  [Save Error] {e}")
+
     final_data = {
         "tokens": {
             "IG": np.array(all_ig), "KL": np.array(all_kl), "ConfDrop": np.array(all_conf), 
@@ -288,7 +316,6 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
         }
     }
 
-    import pickle, os
     os.makedirs("results", exist_ok=True)
     with open(f"results/checkpoint_{dataset_name}.pkl", "wb") as f:
         pickle.dump(final_data, f)
@@ -436,7 +463,7 @@ def main():
     selfcheck = SelfCheckBaseline()
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=500)
+    ragtruth = load_ragtruth(max_samples=800)
     ragtruth = ragtruth.shuffle(seed=42)
     halueval = load_halueval(max_samples=200)
     halueval = halueval.shuffle(seed=42)
@@ -463,20 +490,22 @@ def main():
         
         # Check if we already reached or exceeded the target
         current_count = len(rt_data["per_sample"]["labels"])
-        if current_count >= 500:
+        if current_count >= 800:
             print(f"--- RAGTruth already has {current_count} samples. Skipping to experiments. ---")
         else:
-            print(f"--- RAGTruth has {current_count}/{500} samples. Extending... ---")
+            print(f"--- RAGTruth has {current_count}/{800} samples. Extending... ---")
             rt_data = collect_all_metrics(
                 metric_engine, sem_metric, selfcheck, 
-                ragtruth, "ragtruth", max_samples=500, existing_data=rt_data
+                ragtruth, "ragtruth", max_samples=800, existing_data=rt_data
             )
     else:
         print("RAGTruth checkpoint not found. Starting fresh...")
         rt_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            ragtruth, "ragtruth", max_samples=500, existing_data=None
+            ragtruth, "ragtruth", max_samples=800, existing_data=None
         )
+
+        
 
     # HaluEval Checkpoint
     hv_path = "results/checkpoint_halueval.pkl"

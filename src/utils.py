@@ -7,7 +7,7 @@ import ast
 import pickle
 import os
 
-def load_ragtruth(max_samples=500):
+def load_ragtruth(max_samples=800):
     df_all = pd.read_csv("data/ragtruth/ragtruth.csv")
 
     # ─── STEP 0: GET CURRENT COUNTS FROM CHECKPOINT ───
