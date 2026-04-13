@@ -72,7 +72,7 @@ class SemanticEntropyMetric:
 
     # In semantic_entropy.py, replace compute_semantic_entropy with:
     def compute_semantic_entropy(self, query: str, context: str, 
-                                num_samples: int = 5, 
+                                num_samples: int = 2, 
                                 temperature: float = 0.8) -> float:
         prompt = f"Context: {context}\nQuestion: {query}\nAnswer:"
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
@@ -81,7 +81,7 @@ class SemanticEntropyMetric:
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids,
-                max_new_tokens=20, # Keep it short for speed!
+                max_new_tokens=10, # Keep it short for speed!
                 num_return_sequences=num_samples,
                 do_sample=True,
                 temperature=temperature,

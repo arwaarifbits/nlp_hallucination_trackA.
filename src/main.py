@@ -6,7 +6,6 @@ os.environ["TQDM_DISABLE"] = "1"   # disables ALL tqdm progress bars globally
 
 import numpy as np
 import pandas as pd
-import os
 import pickle
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, f1_score
@@ -139,7 +138,7 @@ def apply_sentence_smoothing(tokens, scores):
 # ─── main collection loop ────────────────────────────────────────────────────
 
 def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset, 
-                        dataset_name, max_samples=300, existing_data=None):
+                        dataset_name, max_samples=500, existing_data=None):
     # --- ADD THIS LOGIC ---
     if existing_data is not None:
         print(f"Resuming {dataset_name} from {len(existing_data['per_sample']['labels'])} samples...")
@@ -191,7 +190,7 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
                 ig, H_no, H_with = metric_obj.compute_information_gain(query, context, response)
                 kl   = metric_obj.compute_kl_divergence(query, context, response)
                 conf = metric_obj.compute_confidence_drop(query, context, response)
-                sem_ent_val = sem_entropy_obj.compute_semantic_entropy(query, context, num_samples=3, temperature=0.8)
+                sem_ent_val = sem_entropy_obj.compute_semantic_entropy(query, context, num_samples=2, temperature=0.8)
                 
                 # 2. Tokenize and Align Labels
                 tokens = metric_obj.tokenizer.tokenize(response)
@@ -203,7 +202,7 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
                 try:
                     samples = selfcheck_obj.generate_samples(
                         metric_obj.model, metric_obj.tokenizer,
-                        prompt, num_samples=4, max_new_tokens=40,
+                        prompt, num_samples=3, max_new_tokens=20,
                         device=metric_obj.device
                     )
                     sentences_to_score = [response.strip()] if response.strip() else ["no response"]
@@ -259,11 +258,11 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
                 all_labels.extend(labels_t)
 
                 # Before storing in sample_metrics:
-                ig_lead = np.roll(ig_hal, 1) # Shift scores forward so t-1 uncertainty aligns with t label
-                ig_lead[0] = ig_hal[0]
+                #ig_lead = np.roll(ig_hal, 1) # Shift scores forward so t-1 uncertainty aligns with t label
+                #ig_lead[0] = ig_hal[0]
 
                 # 7. Composite and Per-Sample Storage
-                sample_metrics = {"IG_Lead": ig_lead, "IG": ig_hal, "KL": kl_hal, "ConfDrop": conf_hal, 
+                sample_metrics = {"IG": ig_hal, "KL": kl_hal, "ConfDrop": conf_hal, 
                                  "SemEnt": sem_arr, "EntOnly": ent_hal, "SelfCheck": sc_hal}
                 comp = build_composite(sample_metrics, labels_t, mode="variance_weight")
 
@@ -294,6 +293,8 @@ def collect_all_metrics(metric_obj, sem_entropy_obj, selfcheck_obj, dataset,
     with open(f"results/checkpoint_{dataset_name}.pkl", "wb") as f:
         pickle.dump(final_data, f)
     return final_data
+
+
 
 
 
@@ -435,9 +436,9 @@ def main():
     selfcheck = SelfCheckBaseline()
 
     # ── Load datasets ─────────────────────────────────────────────
-    ragtruth = load_ragtruth(max_samples=300)
+    ragtruth = load_ragtruth(max_samples=500)
     ragtruth = ragtruth.shuffle(seed=42)
-    halueval = load_halueval(max_samples=300)
+    halueval = load_halueval(max_samples=200)
     halueval = halueval.shuffle(seed=42)
 
     # ── Collect metrics ───────────────────────────────────────────
@@ -451,7 +452,7 @@ def main():
 
     # ── Collect metrics (With "Resume and Extend" Logic) ───────────
     
-    target_samples = 300  # Set your target here once for consistency
+    #target_samples = 500  # Set your target here once for consistency
 
     # RAGTruth Checkpoint
     rt_path = "results/checkpoint_ragtruth.pkl"
@@ -462,19 +463,19 @@ def main():
         
         # Check if we already reached or exceeded the target
         current_count = len(rt_data["per_sample"]["labels"])
-        if current_count >= target_samples:
+        if current_count >= 500:
             print(f"--- RAGTruth already has {current_count} samples. Skipping to experiments. ---")
         else:
-            print(f"--- RAGTruth has {current_count}/{target_samples} samples. Extending... ---")
+            print(f"--- RAGTruth has {current_count}/{500} samples. Extending... ---")
             rt_data = collect_all_metrics(
                 metric_engine, sem_metric, selfcheck, 
-                ragtruth, "ragtruth", max_samples=target_samples, existing_data=rt_data
+                ragtruth, "ragtruth", max_samples=500, existing_data=rt_data
             )
     else:
         print("RAGTruth checkpoint not found. Starting fresh...")
         rt_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            ragtruth, "ragtruth", max_samples=target_samples, existing_data=None
+            ragtruth, "ragtruth", max_samples=500, existing_data=None
         )
 
     # HaluEval Checkpoint
@@ -485,20 +486,22 @@ def main():
             hv_data = pickle.load(f)
             
         current_count = len(hv_data["per_sample"]["labels"])
-        if current_count >= target_samples:
+        if current_count >= 200:
             print(f"--- HaluEval already has {current_count} samples. Skipping to experiments. ---")
         else:
-            print(f"--- HaluEval has {current_count}/{target_samples} samples. Extending... ---")
+            print(f"--- HaluEval has {current_count}/{200} samples. Extending... ---")
             hv_data = collect_all_metrics(
                 metric_engine, sem_metric, selfcheck, 
-                halueval, "halueval", max_samples=target_samples, existing_data=hv_data
+                halueval, "halueval", max_samples=200, existing_data=hv_data
             )
     else:
         print("HaluEval checkpoint not found. Starting fresh...")
         hv_data = collect_all_metrics(
             metric_engine, sem_metric, selfcheck, 
-            halueval, "halueval", max_samples=target_samples, existing_data=None
+            halueval, "halueval", max_samples=200, existing_data=None
         )
+
+
 
     # ── Run experiments ───────────────────────────────────────────
     df_rt = run_all_experiments(rt_data, "ragtruth")
@@ -562,6 +565,7 @@ def main():
         "ConfDrop":safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["ConfDrop"])),
         "EntOnly": safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["EntOnly"])),
         "SelfCheck":    safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["SelfCheck"])),
+        "SemEnt":   safe_auroc(rt_labels, np.nan_to_num(rt_data["tokens"]["SemEnt"])),  # ADD
     }
 
     # Weight = max(0, AUROC - 0.5) so only metrics above random contribute

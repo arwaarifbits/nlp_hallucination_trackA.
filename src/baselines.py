@@ -54,7 +54,7 @@ class SelfCheckBaseline:
         print("SelfCheck-BERTScore ready.")
 
     def generate_samples(self, model, tokenizer, prompt: str,
-                         num_samples: int = 5, max_new_tokens: int = 40,
+                         num_samples: int = 3, max_new_tokens: int = 20,
                          device: str = "mps"):
         inputs = tokenizer(
             prompt, return_tensors="pt",

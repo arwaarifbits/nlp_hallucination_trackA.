@@ -4,8 +4,30 @@ import pickle, os
 import pandas as pd
 import ast
 
-def load_ragtruth(max_samples=300):
+import pickle
+import os
+
+def load_ragtruth(max_samples=500):
     df_all = pd.read_csv("data/ragtruth/ragtruth.csv")
+
+    # ─── STEP 0: GET CURRENT COUNTS FROM CHECKPOINT ───
+    current_hal, current_clean = 0, 0
+    checkpoint_path = "results/checkpoint_ragtruth.pkl"
+    
+    if os.path.exists(checkpoint_path):
+        try:
+            with open(checkpoint_path, "rb") as f:
+                ckpt_data = pickle.load(f)
+            
+            # CRITICAL FIX: Count sample-level labels, not token-level sums
+            # We look at the 'per_sample' section which has 1 label per sentence
+            if "per_sample" in ckpt_data and "labels" in ckpt_data["per_sample"]:
+                labels = ckpt_data["per_sample"]["labels"]
+                current_hal = sum(1 for l in labels if l == 1)
+                current_clean = sum(1 for l in labels if l == 0)
+            
+        except Exception as e:
+            print(f"  [Warning] Could not read checkpoint counts: {e}")
     
     # 1. Clean the labels immediately
     def is_hal(val):
@@ -20,25 +42,39 @@ def load_ragtruth(max_samples=300):
 
     # 2. Use the correct logic for the natural distribution stats
     hal_mask = df_all['labels'].apply(is_hal)
+
     
     print(f"  [Data Setup] Total dataset: {len(df_all)} samples.")
     print(f"  [Data Setup] Natural distribution: {hal_mask.sum()} hallucinated, {len(df_all) - hal_mask.sum()} clean.")
 
     # ─── BALANCE LOGIC ───────────────────────────────────────────
     # Calculate half of the requested total
-    #half_target = max_samples // 2
+    half_target = max_samples // 2
     
     # Select the samples dynamically
     # .head() ensures we take only up to half_target
     #df_hal = df_all[hal_mask].head(half_target)
     #df_clean = df_all[~hal_mask].head(half_target)
 
+    # Calculate how many NEW samples we need to fetch
+    needed_hal = max(0, half_target - current_hal)     # 250 - 135 = 115 more
+    needed_clean = max(0, half_target - current_clean) # 250 - 165 = 85 more
+
+    print(f"--- Balancing RAGTruth to {max_samples} samples ---")
+    print(f"Current: {current_hal} Hal / {current_clean} Clean")
+    print(f"Fetching: {needed_hal} new Hal / {needed_clean} new Clean")
+
     # TEMP- We already have 100 samples in the checkpoint (mostly clean).
     # To reach 150, we want to specifically fetch 50 hallucinated samples.
-    df_hal = df_all[hal_mask].iloc[0:150] # Skipping the 1st one you already have
-    df_clean = df_all[~hal_mask].iloc[0:150] # Your existing 99 + 1 more
+    #df_hal = df_all[hal_mask].iloc[0:150] # Skipping the 1st one you already have
+    #df_clean = df_all[~hal_mask].iloc[0:150] # Your existing 99 + 1 more
     
     #print(f"  [Balance] Sampling {len(df_hal)} hallucinated and {len(df_clean)} clean samples.")
+
+    # 2. Select NEW samples (skipping the ones already in your checkpoint)
+    # We use iloc to skip the first N samples you already processed
+    df_hal = df_all[hal_mask].iloc[current_hal : current_hal + needed_hal]
+    df_clean = df_all[~hal_mask].iloc[current_clean : current_clean + needed_clean]
 
 
     # ─── MODIFIED BALANCE LOGIC ───────────────────────────────────────────
@@ -50,8 +86,8 @@ def load_ragtruth(max_samples=300):
     
     # Selecting the 85 clean samples you already have
     #df_clean = df_all[~hal_mask].iloc[0:85] 
-    print(f"  [Balance] Current Checkpoint: 88 Hal / 112 Normal")
-    print(f"  [Balance] New Target: {len(df_hal)} Hallucinated and {len(df_clean)} Normal.")
+    #print(f"  [Balance] Current Checkpoint: 88 Hal / 112 Normal")
+    #print(f"  [Balance] New Target: {len(df_hal)} Hallucinated and {len(df_clean)} Normal.")
 
 
 
