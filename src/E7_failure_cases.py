@@ -10,7 +10,7 @@ from utils import load_ragtruth
 with open("results/checkpoint_ragtruth.pkl", "rb") as f:
     rt_data = pickle.load(f)
 
-ragtruth = load_ragtruth(max_samples=300)
+ragtruth = load_ragtruth(max_samples=1252)
 
 comp_scores  = rt_data["per_sample"]["composite"]
 label_list   = rt_data["per_sample"]["labels"]

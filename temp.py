@@ -34,6 +34,6 @@ def check_hallucination_split(filepath):
     except Exception as e:
         print(f"Error processing {filepath}: {e}")
 
-check_hallucination_split('results/checkpoint_halueval.pkl')
+check_hallucination_split('results/checkpoint_halueval_FINAL.pkl')
 check_hallucination_split('results/checkpoint_ragtruth.pkl')
 

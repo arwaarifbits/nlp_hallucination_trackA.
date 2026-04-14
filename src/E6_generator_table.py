@@ -9,7 +9,7 @@ sys.path.insert(0, "src")
 from utils import load_ragtruth
 
 # Load dataset — use same max_samples as your checkpoint
-ragtruth = load_ragtruth(max_samples=300)
+ragtruth = load_ragtruth(max_samples=1252)
 
 with open("results/checkpoint_ragtruth.pkl", "rb") as f:
     rt_data = pickle.load(f)
